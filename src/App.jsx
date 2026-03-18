@@ -71,6 +71,27 @@ async function safeFetchGroq(body, retries = 3, delay = 1000) {
   }
 }
 
+// ─── 식약처 텍스트 AI 요약 ───────────────────────────────────────────────────
+async function summarizeMfdsText(label, text) {
+  if (!GROQ_API_KEY || !text || text.length < 50) return text
+  try {
+    const data = await safeFetchGroq({
+      model: GROQ_MODEL,
+      messages: [{
+        role: 'user',
+        content: `다음 의약품 "${label}" 내용을 환자가 이해하기 쉽게 2문장 이내로 요약해주세요. 핵심만 간결하게:
+
+${text}`
+      }],
+      temperature: 0.3,
+      max_tokens: 150,
+    })
+    return data.choices?.[0]?.message?.content?.trim() || text.slice(0, 100)
+  } catch {
+    return text.slice(0, 100)
+  }
+}
+
 // ─── 식약처 API: 의약품 개요정보 조회 ────────────────────────────────────────
 async function fetchMfdsInfo(drugName) {
   if (!MFDS_API_KEY || !drugName) return null
@@ -127,64 +148,122 @@ async function fetchPillByName(drugName) {
   }
 }
 
-// ─── 식약처 API: 낱알식별 - 색상/모양/각인으로 검색 (핵심!) ──────────────────
-async function fetchPillByFeature({ color, shape, imprint }) {
+// ─── 식약처 API: 낱알식별 - 색상/모양/각인으로 검색 ────────────────────────
+async function fetchPillByFeature({ color, shape, imprint, form }) {
   if (!MFDS_API_KEY) return null
   try {
-    const params = new URLSearchParams({ serviceKey: MFDS_API_KEY, type: 'json', numOfRows: '5', pageNo: '1' })
+    const params = new URLSearchParams({ serviceKey: MFDS_API_KEY, type: 'json', numOfRows: '3', pageNo: '1' })
     if (color) params.append('colorClass1', color)
     if (shape) params.append('chart', shape)
     if (imprint) params.append('markKorEng', imprint)
+    if (form) params.append('formCodeName', form)
     const res = await fetch(`${MFDS_PILL_INFO_URL}?${params}`)
     const data = await res.json()
     const items = data?.body?.items
     if (!items || items.length === 0) return null
     return items[0]
   } catch (e) {
-    console.warn('낱알식별(특징) API 오류:', e.message)
+    console.warn('낱알식별 API 오류:', e.message)
     return null
+  }
+}
+
+// ─── 알약 1개 전체 분석 (낱알식별 → 의약품개요 → 종합) ──────────────────────
+async function analyzeSinglePill(pillFeature, symptomHint) {
+  // 1단계: 식약처 낱알식별로 약품 찾기
+  const pillData = await fetchPillByFeature({
+    color: pillFeature.color,
+    shape: pillFeature.shape,
+    imprint: pillFeature.imprint,
+    form: pillFeature.form,
+  })
+
+  // 2단계: 찾은 약품명으로 개요정보 조회
+  let drugInfo = null
+  if (pillData?.itemName) {
+    drugInfo = await fetchMfdsInfo(pillData.itemName)
+  }
+
+  // 3단계: 결과 종합
+  if (pillData) {
+    return {
+      statusCode: 'caution',
+      statusText: '복용 전 확인하세요',
+      summary: pillData.itemName || '약품명 확인됨',
+      drugNameForSearch: pillData.itemName,
+      description: drugInfo?.efcyQesitm
+        ? drugInfo.efcyQesitm.slice(0, 80)
+        : `${pillFeature.color} ${pillFeature.shape} 알약이에요.`,
+      warnings: drugInfo?.atpnQesitm?.slice(0, 80) || '복용 전 약사에게 확인하세요.',
+      dosageGuide: drugInfo?.useMethodQesitm?.slice(0, 60) || '-',
+      interactions: [],
+      activeIngredients: pillData.itemName ? [pillData.itemName] : [],
+      drugType: '처방약',
+      confidence: pillData ? 0.85 : 0.3,
+      pillColor: pillFeature.color,
+      pillShape: pillFeature.shape,
+      pillImprint: pillFeature.imprint,
+      itemImage: pillData?.itemImage || null,
+      entpName: pillData?.entpName || null,
+      mfdsFound: true,
+    }
+  }
+
+  // 식약처에서 못 찾은 경우
+  return {
+    statusCode: 'caution',
+    statusText: '식약처 DB 미등록',
+    summary: `${pillFeature.color} ${pillFeature.shape} 알약`,
+    description: `${pillFeature.color}색 ${pillFeature.shape} 알약이에요. ${pillFeature.imprint ? `각인: ${pillFeature.imprint}` : '각인 없음'}`,
+    warnings: '식약처 DB에서 찾을 수 없어요. 처방한 의사/약사에게 확인하세요.',
+    dosageGuide: '-',
+    interactions: [],
+    activeIngredients: [],
+    drugType: '-',
+    confidence: 0.2,
+    pillColor: pillFeature.color,
+    pillShape: pillFeature.shape,
+    pillImprint: pillFeature.imprint,
+    mfdsFound: false,
   }
 }
 
 // ─── AI Vision 프롬프트 ─────────────────────────────────────────────────────
 const buildVisionPrompt = (userConditions, symptom) => `
-당신은 대한민국 공인 약사입니다. 이미지에서 약품을 분석하고 아래 JSON만 반환하세요.
+당신은 약학 전문가입니다. 이미지 속 알약들을 하나씩 분석하세요.
 사용자 증상: ${symptom || '없음'} / 기저질환: ${userConditions}
 
-## 핵심 지침
-- 이미지에 보이는 텍스트를 최우선으로 읽어서 약품명을 파악하세요
-- 텍스트가 안 보이면 색상/모양/각인으로 추측하세요
-- 절대 감기약이나 타이레놀로 단정짓지 마세요
-- 처방약 봉투면 봉투에 적힌 약품명을 그대로 읽으세요
-- 확실하지 않아도 최선을 다해 분석하고 confidence를 낮게 설정하세요
-- "~로 추정됩니다" 표현 금지
+## 핵심 임무
+봉투/포장 안에 있는 알약 하나하나의 외형 특징을 정확히 추출하세요.
+봉투 텍스트가 아닌 알약 자체의 색상, 모양, 크기, 각인을 집중해서 보세요.
 
-## 약품 범위
-감기약, 해열진통제, 소화제, 항생제, 혈압약, 당뇨약, 피부약, 안약,
-비타민, 수면제, 위장약, 변비약, 근육이완제, 정신건강약, 심장약 등 모든 약품
+## 색상 분류 (식약처 기준)
+하양, 노랑, 주황, 분홍, 빨강, 갈색, 연두, 초록, 청록, 파랑, 남색, 보라, 회색, 검정, 투명
+
+## 모양 분류 (식약처 기준)
+원형, 타원형, 장방형, 삼각형, 사각형, 마름모형, 오각형, 육각형, 팔각형, 기타
+
+## 제형 분류
+정제, 경질캡슐, 연질캡슐, 필름코팅정
 
 JSON만 반환 (마크다운 금지):
 {
-  "statusCode": "safe | caution | danger",
-  "statusText": "한줄 분류",
-  "oneLineSummary": "비전문가용 한줄 요약 (20자 이내)",
-  "summary": "약품명(성분명)",
-  "drugNameForSearch": "한글 약품명만 (식약처 검색용)",
-  "pillColor": "알약 색상 (하양/노랑/분홍/빨강/갈색/연두/초록/파랑/보라/회색 중 하나)",
-  "pillShape": "알약 모양 (원형/타원형/장방형/삼각형/사각형/마름모형 중 하나)",
-  "pillImprint": "각인 문자 (없으면 빈 문자열)",
-  "description": "효능 설명 (2문장 이내, 쉬운 말로)",
-  "warnings": "핵심 주의사항 (1-2문장)",
-  "dosageGuide": "복용 방법 (1문장)",
-  "interactions": ["병용 주의 약물/음식"],
-  "alternatives": "대체약",
-  "activeIngredients": ["성분명"],
-  "drugType": "전문의약품 | 일반의약품 | 한약제제",
-  "confidence": 0.0
+  "pills": [
+    {
+      "color": "색상 (식약처 기준)",
+      "shape": "모양 (식약처 기준)",
+      "form": "제형",
+      "imprint": "각인 문자 (없으면 빈 문자열)",
+      "size": "크기 (소/중/대)",
+      "description": "이 알약의 외형 설명 1문장"
+    }
+  ],
+  "totalCount": 알약_개수,
+  "symptomHint": "증상 기반 예상 약품 종류 (예: 소화제, 항생제 등)"
 }
 
-인식 불가시:
-{"statusCode":"unidentified","summary":"약품 미인식","description":"더 가까이서 촬영해주세요.","confidence":0,"drugNameForSearch":"","pillColor":"","pillShape":"","pillImprint":""}
+알약이 전혀 안 보이면:
+{"pills": [], "totalCount": 0, "symptomHint": ""}
 `
 const buildChatSystemPrompt = (analysisResult, mfdsInfo, userConditions) => `
 당신은 '이거돼?' 앱의 AI 약사입니다.
@@ -217,6 +296,66 @@ const STATUS_MAP = {
 }
 
 // ─── 결과 카드 ────────────────────────────────────────────────────────────────
+// ─── 알약 리스트 카드 ─────────────────────────────────────────────────────────
+function PillListCard({ pillResults, onSelectPill, selectedIdx }) {
+  if (!pillResults || pillResults.length === 0) return null
+  return (
+    <div className="space-y-3 animate-slide-up">
+      <p className="text-xs font-bold text-slate-400 uppercase tracking-wide px-1">
+        분석된 알약 {pillResults.length}개
+      </p>
+      {pillResults.map((pill, i) => {
+        const s = STATUS_MAP[pill.statusCode] || STATUS_MAP.caution
+        const StatusIcon = s.icon
+        const isSelected = selectedIdx === i
+        return (
+          <button
+            key={i}
+            onClick={() => onSelectPill(i)}
+            className={`w-full text-left rounded-2xl border-2 p-4 transition-all ${isSelected ? `${s.border} ${s.bg}` : 'border-slate-100 bg-white'}`}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-lg"
+                style={{ background: pill.pillColor === '하양' ? '#f1f5f9' : pill.pillColor === '분홍' ? '#fce7f3' : pill.pillColor === '파랑' ? '#dbeafe' : pill.pillColor === '노랑' ? '#fef9c3' : pill.pillColor === '연두' ? '#dcfce7' : '#f1f5f9' }}>
+                💊
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="font-bold text-sm text-slate-800 truncate">{pill.summary}</p>
+                  {pill.mfdsFound && <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded-full font-semibold shrink-0">식약처</span>}
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">{pill.pillColor} · {pill.pillShape}{pill.pillImprint ? ` · ${pill.pillImprint}` : ''}</p>
+                <p className="text-xs text-slate-500 mt-1 line-clamp-1">{pill.description}</p>
+              </div>
+              <div className={`text-xs font-bold px-2 py-1 rounded-full shrink-0 ${s.badge}`}>
+                {pill.mfdsFound ? '확인됨' : '미확인'}
+              </div>
+            </div>
+            {isSelected && pill.warnings && (
+              <div className="mt-3 pt-3 border-t border-slate-100 space-y-2">
+                <div className="flex gap-2">
+                  <span className="text-xs font-bold text-slate-400 w-14 shrink-0">복용법</span>
+                  <span className="text-xs text-slate-600">{pill.dosageGuide}</span>
+                </div>
+                <div className="flex gap-2">
+                  <span className="text-xs font-bold text-slate-400 w-14 shrink-0">주의사항</span>
+                  <span className="text-xs text-slate-600">{pill.warnings}</span>
+                </div>
+                {pill.entpName && (
+                  <div className="flex gap-2">
+                    <span className="text-xs font-bold text-slate-400 w-14 shrink-0">제조사</span>
+                    <span className="text-xs text-slate-600">{pill.entpName}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function ResultCard({ result, mfdsInfo, onChat, onRetry }) {
   const statusCode = result?.statusCode || 'unidentified'
   const s = STATUS_MAP[statusCode] || STATUS_MAP.unidentified
@@ -291,7 +430,7 @@ function ResultCard({ result, mfdsInfo, onChat, onRetry }) {
         <InfoRow icon={Clock} label="복용 방법" value={mfdsInfo?.useMethodQesitm || result.dosageGuide} source={mfdsInfo?.useMethodQesitm ? '식약처' : 'AI'} />
         <InfoRow icon={Shield} label="주의사항" value={mfdsInfo?.atpnQesitm || result.warnings} source={mfdsInfo?.atpnQesitm ? '식약처' : 'AI'} />
         {(mfdsInfo?.seQesitm) && <InfoRow icon={AlertTriangle} label="부작용" value={mfdsInfo.seQesitm} source="식약처" />}
-        {result.alternatives && <InfoRow icon={Zap} label="대체약" value={result.alternatives} source="AI" />}
+
       </div>
 
       {/* 성분 태그 */}
@@ -705,7 +844,8 @@ function CameraView({ onCapture, onCancel }) {
 }
 
 // ─── 홈 뷰 ───────────────────────────────────────────────────────────────────
-function HomeView({ userConditions, analysisResult, mfdsInfo, analyzing, mfdsLoading, onCameraCapture, onGalleryUpload, onChat, onHistory, onRetry, previewUrl, logCount, symptom, onSymptomChange, onLogoTap }) {
+function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, analyzing, mfdsLoading, onCameraCapture, onGalleryUpload, onChat, onHistory, onRetry, previewUrl, logCount, symptom, onSymptomChange, onLogoTap }) {
+  const [selectedPillIdx, setSelectedPillIdx] = useState(0)
   const fileInputRef = useRef(null)
   const [step, setStep] = useState(previewUrl || analysisResult ? 2 : 1)
 
@@ -787,8 +927,23 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, analyzing, mfdsLoa
           </div>
         )}
         {(analyzing || mfdsLoading) && <AnalyzingSkeleton mfdsLoading={mfdsLoading} />}
-        {!analyzing && !mfdsLoading && analysisResult && (
-          <ResultCard result={analysisResult} mfdsInfo={mfdsInfo} onChat={onChat} onRetry={() => { onRetry(); setStep(2) }} />
+        {!analyzing && !mfdsLoading && pillResults.length > 0 && (
+          <PillListCard
+            pillResults={pillResults}
+            selectedIdx={selectedPillIdx}
+            onSelectPill={setSelectedPillIdx}
+          />
+        )}
+        {!analyzing && !mfdsLoading && pillResults.length === 0 && analysisResult && analysisResult.statusCode === 'unidentified' && (
+          <ResultCard result={analysisResult} mfdsInfo={null} onChat={onChat} onRetry={() => { onRetry(); setStep(2) }} />
+        )}
+        {!analyzing && !mfdsLoading && pillResults.length > 0 && (
+          <button
+            onClick={onChat}
+            className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-[#0192F5] to-[#40BEFD] text-white font-bold flex items-center justify-center gap-2 shadow-md active:scale-95 transition-all"
+          >
+            <MessageCircle size={18} /> AI 약사에게 더 물어보기
+          </button>
         )}
         {!previewUrl && !analyzing && !analysisResult && (
           <div className="text-center py-8 space-y-4">
@@ -834,6 +989,7 @@ export default function App() {
   const [mfdsLoading, setMfdsLoading] = useState(false)
   const [analysisResult, setAnalysisResult] = useState(null)
   const [mfdsInfo, setMfdsInfo] = useState(null)
+  const [pillResults, setPillResults] = useState([])
   const [analysisLogs, setAnalysisLogs] = useState([])
   const [currentUser, setCurrentUser] = useState(null)
   const [authReady, setAuthReady] = useState(false)
@@ -894,23 +1050,23 @@ export default function App() {
     })
   }, [])
 
-  // AI 분석 + 식약처 API 연동
+  // AI 분석 + 식약처 낱알식별 API 연동
   const runAnalysis = useCallback(async (base64, mimeType = 'image/jpeg') => {
-    // 1단계: Groq Vision AI 분석
     setAnalyzing(true)
     setMfdsInfo(null)
+    setAnalysisResult(null)
+    setPillResults([])
 
     let aiResult
     if (!GROQ_API_KEY) {
       await new Promise(r => setTimeout(r, 1500))
       aiResult = {
-        status: '⚠️주의', statusCode: 'caution', statusText: '데모 모드',
-        oneLineSummary: 'API 키를 설정하면 실제 분석이 가능합니다',
-        summary: 'API 키 미설정', drugNameForSearch: '',
-        description: '.env 파일에 VITE_GROQ_API_KEY를 설정해주세요.',
-        warnings: '이것은 데모 결과입니다.', dosageGuide: '하루 3번, 식후 30분',
-        interactions: [], alternatives: '',
-        activeIngredients: [], drugType: '일반의약품', confidence: 0,
+        pills: [
+          { color: '하양', shape: '원형', form: '정제', imprint: '', size: '중', description: '흰색 원형 알약' },
+          { color: '분홍', shape: '타원형', form: '정제', imprint: '', size: '소', description: '분홍색 타원형 알약' },
+        ],
+        totalCount: 2,
+        symptomHint: 'API 키 미설정'
       }
     } else {
       try {
@@ -921,72 +1077,39 @@ export default function App() {
             { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } }
           ]}],
           temperature: 0.1,
-          max_tokens: 1200,
+          max_tokens: 1000,
         })
         const raw = data.choices?.[0]?.message?.content || '{}'
         aiResult = JSON.parse(raw.replace(/```json|```/g, '').trim())
       } catch (e) {
-        aiResult = { status: '❌위험', statusCode: 'unidentified', summary: '분석 실패', description: e.message, confidence: 0 }
+        setAnalysisResult({ statusCode: 'unidentified', summary: '분석 실패', description: e.message, confidence: 0 })
+        setAnalyzing(false)
+        return
       }
     }
 
-    setAnalysisResult(aiResult)
     setAnalyzing(false)
 
-    // 2단계: 식약처 API 조회 (이름 우선 → 특징 fallback)
-    if (aiResult.statusCode !== 'unidentified') {
-      setMfdsLoading(true)
-      try {
-        let pillData = null
-        let drugInfo = null
+    if (!aiResult.pills || aiResult.pills.length === 0) {
+      setAnalysisResult({ statusCode: 'unidentified', summary: '알약 미인식', description: '알약이 잘 보이도록 다시 촬영해주세요.', confidence: 0 })
+      return
+    }
 
-        // 2-1: 약품명으로 검색 (포장지에서 읽은 경우)
-        const searchName = aiResult.drugNameForSearch || aiResult.summary?.split('(')[0]?.trim()
-        if (searchName) {
-          const [di, pi] = await Promise.all([
-            fetchMfdsInfo(searchName),
-            fetchPillByName(searchName),
-          ])
-          drugInfo = di
-          pillData = pi
-        }
-
-        // 2-2: 약품명 검색 실패 시 색상/모양/각인으로 재검색
-        if (!pillData && (aiResult.pillColor || aiResult.pillShape || aiResult.pillImprint)) {
-          pillData = await fetchPillByFeature({
-            color: aiResult.pillColor,
-            shape: aiResult.pillShape,
-            imprint: aiResult.pillImprint,
-          })
-          // 낱알식별로 찾은 경우 약품명으로 다시 개요정보 검색
-          if (pillData && !drugInfo) {
-            drugInfo = await fetchMfdsInfo(pillData.itemName)
-            // AI 결과도 업데이트
-            aiResult = {
-              ...aiResult,
-              summary: pillData.itemName || aiResult.summary,
-              drugNameForSearch: pillData.itemName,
-            }
-            setAnalysisResult(aiResult)
-          }
-        }
-
-        if (drugInfo || pillData) {
-          setMfdsInfo({ ...drugInfo, ...pillData })
-        }
-      } catch (e) {
-        console.warn('식약처 API 조회 실패:', e.message)
-      } finally {
-        setMfdsLoading(false)
+    setMfdsLoading(true)
+    try {
+      const results = await Promise.all(
+        aiResult.pills.map(pill => analyzeSinglePill(pill, aiResult.symptomHint))
+      )
+      setPillResults(results)
+      setAnalysisResult(results[0])
+      if (results[0]?.statusCode !== 'unidentified') {
+        await saveToFirestore(results[0])
       }
+    } catch (e) {
+      console.warn('분석 실패:', e.message)
+    } finally {
+      setMfdsLoading(false)
     }
-
-    // Firestore 저장
-    if (aiResult.statusCode !== 'unidentified') {
-      await saveToFirestore(aiResult)
-    }
-
-    return aiResult
   }, [userConditions, symptom, saveToFirestore])
 
   const handleCameraCapture = useCallback(async (blob) => {
@@ -1033,10 +1156,10 @@ export default function App() {
     <>
       <HomeView
         userConditions={userConditions} analysisResult={analysisResult} mfdsInfo={mfdsInfo}
-        analyzing={analyzing} mfdsLoading={mfdsLoading}
+        pillResults={pillResults} analyzing={analyzing} mfdsLoading={mfdsLoading}
         onCameraCapture={() => setView('camera')} onGalleryUpload={handleGalleryUpload}
         onChat={() => setView('chat')} onHistory={() => setView('history')}
-        onRetry={() => { setPreviewUrl(null); setAnalysisResult(null); setMfdsInfo(null) }}
+        onRetry={() => { setPreviewUrl(null); setAnalysisResult(null); setMfdsInfo(null); setPillResults([]) }}
         previewUrl={previewUrl} logCount={analysisLogs.length}
         symptom={symptom} onSymptomChange={setSymptom} onLogoTap={handleLogoTap}
       />
