@@ -146,46 +146,45 @@ async function fetchPillByFeature({ color, shape, imprint }) {
   }
 }
 
-// ─── AI Vision 프롬프트 (특징 추출 전용) ────────────────────────────────────
+// ─── AI Vision 프롬프트 ─────────────────────────────────────────────────────
 const buildVisionPrompt = (userConditions, symptom) => `
-당신은 이미지 분석 전문가입니다. 약품 이미지에서 아래 정보를 최대한 정확하게 추출하세요.
-사용자 증상: ${symptom || '없음'}
+당신은 대한민국 공인 약사입니다. 이미지에서 약품을 분석하고 아래 JSON만 반환하세요.
+사용자 증상: ${symptom || '없음'} / 기저질환: ${userConditions}
 
-## 추출해야 할 정보
+## 핵심 지침
+- 이미지에 보이는 텍스트를 최우선으로 읽어서 약품명을 파악하세요
+- 텍스트가 안 보이면 색상/모양/각인으로 추측하세요
+- 절대 감기약이나 타이레놀로 단정짓지 마세요
+- 처방약 봉투면 봉투에 적힌 약품명을 그대로 읽으세요
+- 확실하지 않아도 최선을 다해 분석하고 confidence를 낮게 설정하세요
+- "~로 추정됩니다" 표현 금지
 
-1. **약품명/텍스트**: 포장지, 약 봉투, 알약 각인에 보이는 모든 한글/영문 텍스트
-2. **알약 색상**: 정확한 색상 (예: 흰색, 노란색, 분홍색, 하늘색, 주황색 등)
-3. **알약 모양**: 원형, 타원형, 장방형, 삼각형, 사각형, 마름모형 등
-4. **각인 문자**: 알약 표면에 새겨진 문자나 숫자 (예: "500", "LOR", "HT" 등)
-5. **제형**: 정제, 캡슐, 시럽, 연고, 파스 등
-
-## 판단 기준
-- 포장지에 약품명이 보이면 반드시 그대로 읽어서 drugNameForSearch에 입력
-- 알약만 보이면 색상/모양/각인을 최대한 정확하게 기술
-- 약 봉투면 봉투에 적힌 약품명 우선
+## 약품 범위
+감기약, 해열진통제, 소화제, 항생제, 혈압약, 당뇨약, 피부약, 안약,
+비타민, 수면제, 위장약, 변비약, 근육이완제, 정신건강약, 심장약 등 모든 약품
 
 JSON만 반환 (마크다운 금지):
 {
-  "drugNameForSearch": "포장지/봉투에서 읽은 정확한 한글 약품명 (없으면 빈 문자열)",
-  "pillColor": "알약 색상 (식약처 기준: 하양, 노랑, 분홍, 빨강, 갈색, 연두, 초록, 청록, 파랑, 남색, 보라, 회색, 검정, 투명)",
-  "pillShape": "알약 모양 (식약처 기준: 원형, 타원형, 장방형, 삼각형, 사각형, 마름모형, 오각형, 육각형, 팔각형, 기타)",
-  "pillImprint": "각인 문자 (없으면 빈 문자열)",
   "statusCode": "safe | caution | danger",
   "statusText": "한줄 분류",
-  "oneLineSummary": "비전문가용 한줄 요약",
-  "summary": "읽은 약품명 또는 특징 기반 추측",
-  "description": "약의 효능 설명 (쉬운 말로)",
-  "warnings": "주의사항",
-  "dosageGuide": "복용 방법",
-  "interactions": ["병용 주의"],
+  "oneLineSummary": "비전문가용 한줄 요약 (20자 이내)",
+  "summary": "약품명(성분명)",
+  "drugNameForSearch": "한글 약품명만 (식약처 검색용)",
+  "pillColor": "알약 색상 (하양/노랑/분홍/빨강/갈색/연두/초록/파랑/보라/회색 중 하나)",
+  "pillShape": "알약 모양 (원형/타원형/장방형/삼각형/사각형/마름모형 중 하나)",
+  "pillImprint": "각인 문자 (없으면 빈 문자열)",
+  "description": "효능 설명 (2문장 이내, 쉬운 말로)",
+  "warnings": "핵심 주의사항 (1-2문장)",
+  "dosageGuide": "복용 방법 (1문장)",
+  "interactions": ["병용 주의 약물/음식"],
   "alternatives": "대체약",
   "activeIngredients": ["성분명"],
   "drugType": "전문의약품 | 일반의약품 | 한약제제",
   "confidence": 0.0
 }
 
-약품을 전혀 인식할 수 없으면:
-{"statusCode": "unidentified", "summary": "약품 미인식", "description": "더 가까이서 촬영해주세요.", "confidence": 0, "drugNameForSearch": "", "pillColor": "", "pillShape": "", "pillImprint": ""}
+인식 불가시:
+{"statusCode":"unidentified","summary":"약품 미인식","description":"더 가까이서 촬영해주세요.","confidence":0,"drugNameForSearch":"","pillColor":"","pillShape":"","pillImprint":""}
 `
 const buildChatSystemPrompt = (analysisResult, mfdsInfo, userConditions) => `
 당신은 '이거돼?' 앱의 AI 약사입니다.
@@ -372,6 +371,8 @@ function ResultCard({ result, mfdsInfo, onChat, onRetry }) {
 
 function InfoRow({ icon: Icon, label, value, source }) {
   if (!value) return null
+  // 식약처 텍스트 100자로 요약
+  const displayValue = value.length > 100 ? value.slice(0, 100) + '...' : value
   return (
     <div className="flex gap-3 p-3">
       <div className="w-7 h-7 rounded-xl bg-blue-50 flex items-center justify-center shrink-0 mt-0.5">
@@ -386,7 +387,7 @@ function InfoRow({ icon: Icon, label, value, source }) {
             </span>
           )}
         </div>
-        <p className="text-sm text-slate-700 leading-snug">{value}</p>
+        <p className="text-sm text-slate-700 leading-snug">{displayValue}</p>
       </div>
     </div>
   )
@@ -394,10 +395,11 @@ function InfoRow({ icon: Icon, label, value, source }) {
 
 function MfdsRow({ label, value, highlight }) {
   if (!value) return null
+  const displayValue = value.length > 150 ? value.slice(0, 150) + '...' : value
   return (
     <div className={`p-3 ${highlight ? 'bg-red-50' : ''}`}>
       <p className={`text-xs font-bold mb-1 ${highlight ? 'text-red-600' : 'text-slate-400'}`}>{label}</p>
-      <p className="text-xs text-slate-600 leading-relaxed">{value}</p>
+      <p className="text-xs text-slate-600 leading-relaxed">{displayValue}</p>
     </div>
   )
 }
