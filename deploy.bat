@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 > nul
-title 이거돼? — GitHub + Vercel 자동 배포
+title 이거돼? — GitHub 자동 배포
 
 cd C:\Users\vh132\Downloads\igodae
 
@@ -15,11 +15,6 @@ git add -A
 git commit -m "%COMMIT_MSG%"
 git push origin main
 if %errorlevel% neq 0 ( echo [오류] git push 실패 & pause & exit /b 1 )
-echo [완료] GitHub push 성공!
-
-echo.
-echo [Vercel] Production 배포 시작...
-vercel --prod
 
 echo.
 echo   GitHub   : https://github.com/Igodae/igodae
