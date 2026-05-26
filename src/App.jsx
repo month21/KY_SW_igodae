@@ -1,6 +1,12 @@
 /**
  * 이거돼? — AI 기반 약물 판독 & 복약 가이드
  * Stack: React + Vite + Tailwind CSS + Firebase + Groq + 식약처 API
+ *
+ * [v2 변경사항]
+ * - 이메일/비밀번호 로그인 + 게스트 모드 추가
+ * - Firestore users/{uid} role 기반 관리자 권한
+ * - AdminView: 유저 목록/관리, corrections 실시간, 통계 개선
+ * - HistoryView: Base64 이미지 압축 + 썸네일 (Storage 미사용)
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -8,12 +14,19 @@ import {
   Camera, ImagePlus, Send, ChevronRight, Clock, AlertTriangle,
   CheckCircle, XCircle, Pill, MessageCircle, History,
   Loader2, Sparkles, RefreshCw, ChevronLeft,
-  Shield, Zap, X, Database
+  Shield, Zap, X, Database, LogOut, Users, UserCheck, UserX
 } from 'lucide-react'
 
 import { initializeApp, getApps } from 'firebase/app'
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth'
-import { getFirestore, collection, addDoc, query, orderBy, limit, onSnapshot, serverTimestamp } from 'firebase/firestore'
+import {
+  getAuth, onAuthStateChanged,
+  signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut,
+} from 'firebase/auth'
+import {
+  getFirestore, collection, addDoc, query, orderBy, limit,
+  onSnapshot, serverTimestamp, doc, getDoc, setDoc, updateDoc, getDocs,
+} from 'firebase/firestore'
+// Storage 미사용 (이미지는 Base64로 Firestore에 저장)
 
 // ─── 환경변수 ─────────────────────────────────────────────────────────────────
 const firebaseConfig = {
@@ -52,15 +65,121 @@ const DUR_ENDPOINTS = {
 // ─── Firebase 초기화 ──────────────────────────────────────────────────────────
 let app, auth, db
 try {
-  app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig)
+  app  = getApps().length ? getApps()[0] : initializeApp(firebaseConfig)
   auth = getAuth(app)
-  db = getFirestore(app)
+  db   = getFirestore(app)
 } catch (e) {
   console.warn('Firebase 초기화 실패:', e.message)
 }
 
-const LOGS_PATH = () => collection(db, `artifacts/${APP_ID}/public/data/analysis_logs`)
+const LOGS_PATH        = () => collection(db, `artifacts/${APP_ID}/public/data/analysis_logs`)
 const CORRECTIONS_PATH = () => collection(db, `artifacts/${APP_ID}/public/data/corrections`)
+const USERS_PATH       = () => collection(db, 'users')
+
+// ─── Auth 에러 → 한국어 ───────────────────────────────────────────────────────
+function getAuthErrorMsg(code) {
+  const map = {
+    'auth/invalid-email':          '올바른 이메일 형식이 아닙니다.',
+    'auth/user-disabled':          '비활성화된 계정입니다.',
+    'auth/user-not-found':         '등록되지 않은 이메일입니다.',
+    'auth/wrong-password':         '비밀번호가 올바르지 않습니다.',
+    'auth/invalid-credential':     '이메일 또는 비밀번호가 맞지 않습니다.',
+    'auth/email-already-in-use':   '이미 사용 중인 이메일입니다.',
+    'auth/weak-password':          '비밀번호는 6자 이상이어야 합니다.',
+    'auth/too-many-requests':      '잠시 후 다시 시도해주세요.',
+    'auth/network-request-failed': '네트워크 오류가 발생했습니다.',
+  }
+  return map[code] || '인증 오류가 발생했습니다.'
+}
+
+// ─── AuthView (로그인 / 회원가입 / 게스트) ────────────────────────────────────
+function AuthView({ onGuest }) {
+  const [tab, setTab]           = useState('login')
+  const [email, setEmail]       = useState('')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading]   = useState(false)
+  const [error, setError]       = useState('')
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setLoading(true); setError('')
+    try {
+      if (tab === 'login') {
+        await signInWithEmailAndPassword(auth, email.trim(), password)
+      } else {
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password)
+        await setDoc(doc(db, 'users', cred.user.uid), {
+          email: cred.user.email, role: 'user',
+          createdAt: serverTimestamp(), lastLogin: serverTimestamp(),
+        })
+      }
+    } catch (err) { setError(getAuthErrorMsg(err.code)) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <div className="min-h-[100dvh] flex flex-col bg-white">
+      <div className="bg-gradient-to-b from-[#0192F5] to-[#40BEFD] px-6 pt-16 pb-12 flex flex-col items-center gap-3">
+        <div className="w-16 h-16 rounded-3xl bg-white/20 flex items-center justify-center text-4xl shadow-lg">💊</div>
+        <h1 className="text-3xl font-black text-white tracking-tight">이거돼?</h1>
+        <p className="text-white/80 text-sm font-medium">AI 복약 가이드 서비스</p>
+      </div>
+      <div className="flex-1 px-5 -mt-6">
+        <div className="bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden">
+          <div className="flex border-b border-slate-100">
+            {[['login','로그인'],['signup','회원가입']].map(([key,label]) => (
+              <button key={key} onClick={() => { setTab(key); setError('') }}
+                className={`flex-1 py-4 text-sm font-bold transition-colors ${tab===key?'text-[#0192F5] border-b-2 border-[#0192F5]':'text-slate-400'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <form onSubmit={handleSubmit} className="p-5 space-y-3">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-400 pl-1">이메일</label>
+              <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
+                placeholder="example@email.com" autoComplete="email" required
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:border-[#0192F5] transition-colors"/>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-400 pl-1">비밀번호</label>
+              <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+                placeholder={tab==='login'?'비밀번호 입력':'6자 이상 입력'} required
+                autoComplete={tab==='login'?'current-password':'new-password'}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:border-[#0192F5] transition-colors"/>
+            </div>
+            {error && (
+              <div className="flex items-center gap-2 bg-red-50 border border-red-100 rounded-2xl px-4 py-2.5">
+                <XCircle size={14} className="text-red-500 shrink-0"/>
+                <p className="text-xs font-bold text-red-600">{error}</p>
+              </div>
+            )}
+            <button type="submit" disabled={loading}
+              className="w-full py-3.5 bg-[#0192F5] text-white font-black text-sm rounded-2xl shadow-md shadow-blue-100 active:scale-[0.98] transition-transform disabled:opacity-50 mt-1">
+              {loading?'처리 중...':tab==='login'?'로그인':'회원가입하고 시작하기'}
+            </button>
+          </form>
+        </div>
+        <div className="flex items-center gap-3 my-4 px-1">
+          <div className="flex-1 h-px bg-slate-200"/>
+          <span className="text-xs text-slate-400 font-medium">또는</span>
+          <div className="flex-1 h-px bg-slate-200"/>
+        </div>
+        <button onClick={onGuest}
+          className="w-full py-3.5 rounded-2xl border-2 border-slate-200 text-slate-600 font-bold text-sm flex items-center justify-center gap-2 active:bg-slate-50 transition-colors">
+          <span>👤</span> 로그인 없이 둘러보기
+        </button>
+        <p className="text-center text-xs text-slate-400 mt-3 leading-relaxed">게스트는 분석 기록이 저장되지 않아요</p>
+        {tab==='signup' && (
+          <p className="text-center text-xs text-slate-300 mt-2 leading-relaxed">
+            관리자 계정은 가입 후 Firebase 콘솔에서 role을 'admin'으로 변경해주세요
+          </p>
+        )}
+      </div>
+      <div className="h-8"/>
+    </div>
+  )
+}
 
 // ─── Groq API 호출 (지수 백오프) ─────────────────────────────────────────────
 async function safeFetchGroq(body, retries = 3, delay = 1000) {
@@ -1474,13 +1593,41 @@ function ChatView({ result, mfdsInfo, userConditions, onBack }) {
   )
 }
 
-// ─── 히스토리 뷰 ─────────────────────────────────────────────────────────────
-function HistoryView({ logs, onSelect, onBack }) {
+// ─── 히스토리 뷰 (Base64 썸네일 + 게스트 안내) ──────────────────────────────
+function HistoryView({ logs, onSelect, onBack, isGuest }) {
+  // 게스트인 경우 로그인 유도
+  if (isGuest) {
+    return (
+      <div className="flex flex-col h-[100dvh]">
+        <div className="sticky top-0 z-10 px-4 pt-4 pb-3 border-b border-slate-100 bg-white flex items-center gap-3">
+          <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-slate-100 flex items-center justify-center">
+            <ChevronLeft size={20} className="text-slate-600" />
+          </button>
+          <p className="flex-1 font-bold text-slate-800">분석 기록</p>
+        </div>
+        <div className="flex-1 flex flex-col items-center justify-center text-slate-400 space-y-4 px-8">
+          <div className="w-20 h-20 rounded-3xl bg-blue-50 flex items-center justify-center text-4xl">🔒</div>
+          <div className="text-center space-y-1">
+            <p className="font-bold text-slate-700 text-base">로그인이 필요해요</p>
+            <p className="text-xs leading-relaxed text-slate-400">분석 기록은 로그인한 유저만 저장돼요.<br/>회원가입하면 내 복약 히스토리를 볼 수 있어요.</p>
+          </div>
+          <button onClick={onBack}
+            className="px-6 py-3 bg-[#0192F5] text-white rounded-2xl font-bold text-sm active:scale-95 transition-transform">
+            로그인하러 가기
+          </button>
+        </div>
+        <DisclaimerBar />
+      </div>
+    )
+  }
+
   if (logs.length === 0) {
     return (
       <div className="flex flex-col h-[100dvh]">
         <div className="sticky top-0 z-10 px-4 pt-4 pb-3 border-b border-slate-100 bg-white flex items-center gap-3">
-          <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-slate-100 flex items-center justify-center"><ChevronLeft size={20} className="text-slate-600" /></button>
+          <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-slate-100 flex items-center justify-center">
+            <ChevronLeft size={20} className="text-slate-600" />
+          </button>
           <p className="flex-1 font-bold text-slate-800">분석 기록</p>
         </div>
         <div className="flex-1 flex flex-col items-center justify-center text-slate-400 space-y-3 px-8">
@@ -1494,24 +1641,50 @@ function HistoryView({ logs, onSelect, onBack }) {
       </div>
     )
   }
+
   return (
     <div className="flex flex-col h-[100dvh]">
       <div className="sticky top-0 z-10 px-4 pt-4 pb-3 border-b border-slate-100 bg-white flex items-center gap-3">
-        <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-slate-100 flex items-center justify-center"><ChevronLeft size={20} className="text-slate-600" /></button>
-        <p className="flex-1 font-bold text-slate-800">분석 기록</p>
+        <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-slate-100 flex items-center justify-center">
+          <ChevronLeft size={20} className="text-slate-600" />
+        </button>
+        <p className="flex-1 font-bold text-slate-800">나의 복약 히스토리</p>
+        <span className="text-xs bg-blue-50 text-blue-500 font-bold px-2 py-1 rounded-full">{logs.length}건</span>
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
         {logs.map((log, i) => {
           const s = STATUS_MAP[log.statusCode] || STATUS_MAP.unidentified
           const StatusIcon = s.icon
+          const confidencePct = getConfidencePct(log.confidence)
           return (
             <button key={log.id || i} onClick={() => onSelect(log)}
-              className={`w-full text-left p-4 rounded-2xl border ${s.border} ${s.bg} flex items-center gap-3 transition-all`}>
-              <StatusIcon className={`${s.text} shrink-0`} size={22} />
-              <div className="flex-1 min-w-0">
-                <p className="font-bold text-slate-800 truncate text-sm">{log.summary || '약품명 없음'}</p>
-                <p className="text-xs text-slate-400 mt-0.5">{log.statusText || s.label}</p>
-                <p className="text-xs text-slate-300 mt-0.5">{log.createdAt?.toDate?.()?.toLocaleDateString('ko-KR') || '날짜 없음'}</p>
+              className="w-full bg-white p-3 rounded-3xl border border-slate-100 shadow-sm flex gap-3 items-center active:scale-[0.99] transition-all text-left">
+              {/* 히스토리 썸네일 (Base64) */}
+              <div className="w-14 h-14 bg-slate-100 rounded-2xl overflow-hidden relative shrink-0 border border-slate-200/60">
+                {log.imageBase64
+                  ? <img src={log.imageBase64} className="w-full h-full object-cover" alt="약품" loading="lazy" />
+                  : <div className="w-full h-full flex items-center justify-center text-2xl">💊</div>
+                }
+                {confidencePct > 0 && (
+                  <div className="absolute bottom-0 inset-x-0 bg-black/50 text-[9px] text-white font-black text-center py-0.5 backdrop-blur-sm">
+                    {confidencePct}%
+                  </div>
+                )}
+              </div>
+              {/* 메타 */}
+              <div className="flex-1 min-w-0 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${s.badge}`}>
+                    {log.statusText || s.label}
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    {log.createdAt?.toDate?.()?.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' }) || ''}
+                  </span>
+                </div>
+                <p className="font-black text-slate-800 text-sm truncate">{log.summary || '미분석 약품'}</p>
+                {log.userConditions && (
+                  <p className="text-xs text-slate-400 truncate">{log.userConditions}</p>
+                )}
               </div>
               <ChevronRight size={16} className="text-slate-300 shrink-0" />
             </button>
@@ -1523,61 +1696,168 @@ function HistoryView({ logs, onSelect, onBack }) {
   )
 }
 
-// ─── 관리자 뷰 ────────────────────────────────────────────────────────────────
-function AdminView({ logs, onBack }) {
-  const total = logs.length
-  const trusted = logs.filter(l => (l.confidence || 0) >= 0.8).length
-  const untrusted = total - trusted
-  const avgConfidence = total > 0 ? Math.round(logs.reduce((sum, l) => sum + (l.confidence || 0), 0) / total * 100) : 0
-  const safeCount = logs.filter(l => (l.confidence || 0) >= 0.8 && l.statusCode !== 'danger').length
-  const cautionCount = logs.filter(l => (l.confidence || 0) < 0.8 && l.statusCode !== 'danger').length
+
+// ─── 관리자 뷰 (유저 관리 + corrections + 통계) ──────────────────────────────
+function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
+  const [adminTab, setAdminTab] = useState('stats')  // 'stats' | 'users' | 'corrections'
+
+  // ── 통계 계산 ────────────────────────────────────────────────────────────────
+  const total     = logs.length
+  const trusted   = logs.filter(l => (l.confidence || 0) >= 0.8).length
+  const avgConf   = total > 0
+    ? Math.round(logs.reduce((sum, l) => sum + (l.confidence || 0), 0) / total * 100)
+    : 0
+  const safeCount   = logs.filter(l => (l.confidence||0) >= 0.8 && l.statusCode !== 'danger').length
+  const cautionCount= logs.filter(l => (l.confidence||0) <  0.8 && l.statusCode !== 'danger').length
   const dangerCount = logs.filter(l => l.statusCode === 'danger').length
+  const today       = new Date()
+  const todayCount  = logs.filter(l => {
+    const d = l.createdAt?.toDate?.()
+    return d && d.toDateString() === today.toDateString()
+  }).length
+
+  // ── 유저별 분석 횟수 계산 ─────────────────────────────────────────────────
+  const logCountByUser = logs.reduce((acc, l) => {
+    if (l.userId) acc[l.userId] = (acc[l.userId] || 0) + 1
+    return acc
+  }, {})
+
+  const TABS = [
+    { key: 'stats', label: '통계',              icon: '📊' },
+    { key: 'users', label: `유저(${allUsers.length})`, icon: '👥' },
+  ]
 
   return (
     <div className="flex flex-col h-[100dvh] bg-slate-900">
-      <div className="px-5 pt-6 pb-4 bg-slate-800 flex items-center gap-3 border-b border-slate-700">
-        <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-slate-700 flex items-center justify-center">
-          <ChevronLeft size={20} className="text-white" />
-        </button>
-        <div>
-          <p className="font-bold text-white text-sm">관리자 대시보드</p>
-          <p className="text-xs text-slate-400">이거돼? 서비스 현황</p>
-        </div>
-        <div className="ml-auto w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-      </div>
-      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
-        <div className="bg-slate-800 rounded-3xl p-5 border border-slate-700">
-          <p className="text-slate-400 text-xs font-medium mb-1">총 분석 횟수</p>
-          <p className="text-4xl font-black text-white">{total}<span className="text-lg text-slate-400 ml-1">회</span></p>
-        </div>
-        <div className="bg-slate-800 rounded-3xl p-5 border border-slate-700">
-          <p className="text-slate-400 text-xs font-medium mb-3">AI 인식 정확도</p>
-          <p className="text-4xl font-black mb-3" style={{ color: avgConfidence >= 80 ? '#10b981' : '#f59e0b' }}>{avgConfidence}%</p>
-          <div className="h-3 bg-slate-700 rounded-full overflow-hidden">
-            <div className="h-full rounded-full" style={{ width: `${avgConfidence}%`, background: avgConfidence >= 80 ? '#10b981' : '#f59e0b' }} />
+      {/* 헤더 */}
+      <div className="px-5 pt-6 pb-0 bg-slate-800 border-b border-slate-700 sticky top-0 z-10">
+        <div className="flex items-center gap-3 pb-3">
+          <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-slate-700 flex items-center justify-center">
+            <ChevronLeft size={20} className="text-white" />
+          </button>
+          <Shield size={18} className="text-[#0192F5]" />
+          <div className="flex-1">
+            <p className="font-bold text-white text-sm">Master 대시보드</p>
+            <p className="text-xs text-slate-400">이거돼? 서비스 현황</p>
           </div>
-          <div className="flex justify-between mt-3">
-            <div className="text-center"><p className="text-emerald-400 font-bold text-lg">{trusted}</p><p className="text-slate-500 text-xs">신뢰 (80% 이상)</p></div>
-            <div className="text-center"><p className="text-amber-400 font-bold text-lg">{untrusted}</p><p className="text-slate-500 text-xs">미신뢰 (80% 미만)</p></div>
-          </div>
+          <span className="bg-blue-900 text-blue-300 text-xs px-2.5 py-1 rounded-full font-bold">Admin</span>
+          <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
         </div>
-        <div className="bg-slate-800 rounded-3xl p-5 border border-slate-700">
-          <p className="text-slate-400 text-xs font-medium mb-3">사회 기여도</p>
-          {[['#10b981', '안전 약품 안내', safeCount], ['#f59e0b', '주의 필요 경고', cautionCount], ['#ef4444', '위험 약품 차단', dangerCount]].map(([color, label, count]) => (
-            <div key={label} className="flex items-center justify-between mb-3 last:mb-0">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full" style={{ background: color }} />
-                <p className="text-slate-300 text-sm">{label}</p>
-              </div>
-              <p className="font-bold" style={{ color }}>{count}건</p>
-            </div>
+        {/* 탭 */}
+        <div className="flex gap-1">
+          {TABS.map(t => (
+            <button key={t.key} onClick={() => setAdminTab(t.key)}
+              className={`flex-1 py-2.5 text-xs font-bold rounded-t-xl transition-colors ${adminTab === t.key ? 'bg-slate-900 text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+              {t.icon} {t.label}
+            </button>
           ))}
         </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
+
+        {/* ── 통계 탭 ── */}
+        {adminTab === 'stats' && (
+          <>
+            {/* 요약 카드 2열 */}
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                ['총 분석', `${total}회`, '#60a5fa'],
+                ['오늘 분석', `${todayCount}건`, '#34d399'],
+                ['신뢰 분석', `${trusted}건`, '#a78bfa'],
+                ['정정 요청', `${corrections.length}건`, '#fb923c'],
+              ].map(([label, value, color]) => (
+                <div key={label} className="bg-slate-800 p-4 rounded-2xl border border-slate-700">
+                  <p className="text-slate-400 text-xs font-medium">{label}</p>
+                  <p className="text-2xl font-black mt-1" style={{ color }}>{value}</p>
+                </div>
+              ))}
+            </div>
+            {/* 정확도 바 */}
+            <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700 space-y-3">
+              <p className="text-slate-400 text-xs font-medium">AI 인식 정확도</p>
+              <p className="text-4xl font-black" style={{ color: avgConf >= 80 ? '#10b981' : '#f59e0b' }}>{avgConf}%</p>
+              <div className="h-2.5 bg-slate-700 rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all" style={{ width: `${avgConf}%`, background: avgConf >= 80 ? '#10b981' : '#f59e0b' }} />
+              </div>
+              <div className="flex justify-between text-center">
+                <div><p className="text-emerald-400 font-bold">{trusted}</p><p className="text-slate-500 text-xs">신뢰 (80%↑)</p></div>
+                <div><p className="text-amber-400 font-bold">{total - trusted}</p><p className="text-slate-500 text-xs">미신뢰</p></div>
+              </div>
+            </div>
+            {/* 사회 기여도 */}
+            <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700 space-y-3">
+              <p className="text-slate-400 text-xs font-medium">사회 기여도</p>
+              {[['#10b981','안전 약품 안내',safeCount],['#f59e0b','주의 필요 경고',cautionCount],['#ef4444','위험 약품 차단',dangerCount]].map(([color,label,count]) => (
+                <div key={label} className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded-full" style={{ background: color }} />
+                    <p className="text-slate-300 text-sm">{label}</p>
+                  </div>
+                  <p className="font-bold" style={{ color }}>{count}건</p>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* ── 유저 관리 탭 ── */}
+        {adminTab === 'users' && (
+          <div className="space-y-3">
+            <p className="text-xs font-black text-slate-400 uppercase tracking-wider px-1">
+              전체 가입 유저 {allUsers.length}명
+            </p>
+            {allUsers.length === 0 && (
+              <p className="text-center text-slate-500 text-sm py-10">가입된 유저가 없습니다.</p>
+            )}
+            {allUsers.map((user) => {
+              const isAdmin    = user.role === 'admin'
+              const userLogs   = logCountByUser[user.uid] || 0
+              const joinDate   = user.createdAt?.toDate?.()?.toLocaleDateString('ko-KR', { year: '2-digit', month: 'short', day: 'numeric' }) || '-'
+              return (
+                <div key={user.uid} className="bg-slate-800 rounded-2xl border border-slate-700 p-4 space-y-3">
+                  <div className="flex items-start gap-3">
+                    {/* 아바타 */}
+                    <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-lg shrink-0 ${isAdmin ? 'bg-blue-900' : 'bg-slate-700'}`}>
+                      {isAdmin ? '👑' : '👤'}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="text-white text-sm font-bold truncate">{user.email || '이메일 없음'}</p>
+                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${isAdmin ? 'bg-blue-900 text-blue-300' : 'bg-slate-700 text-slate-400'}`}>
+                          {isAdmin ? 'ADMIN' : 'USER'}
+                        </span>
+                      </div>
+                      <div className="flex gap-3 mt-1">
+                        <p className="text-xs text-slate-500">가입 {joinDate}</p>
+                        <p className="text-xs text-slate-500">분석 {userLogs}회</p>
+                      </div>
+                      <p className="text-[10px] text-slate-600 mt-0.5 font-mono truncate">{user.uid}</p>
+                    </div>
+                  </div>
+                  {/* 권한 토글 버튼 */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => onUpdateUserRole(user.uid, isAdmin ? 'user' : 'admin')}
+                      className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors ${isAdmin ? 'bg-red-900/60 text-red-300 hover:bg-red-900' : 'bg-blue-900/60 text-blue-300 hover:bg-blue-900'}`}>
+                      {isAdmin
+                        ? <><UserX size={12} /> 관리자 해제</>
+                        : <><UserCheck size={12} /> 관리자로 승격</>
+                      }
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
       </div>
       <DisclaimerBar />
     </div>
   )
 }
+
 
 // ─── 온보딩 슬라이드 ──────────────────────────────────────────────────────────
 function OnboardingSlides({ onComplete }) {
@@ -1736,7 +2016,7 @@ function CameraView({ onCapture, onCancel }) {
 }
 
 // ─── 홈 뷰 ───────────────────────────────────────────────────────────────────
-function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combinedAnalysis, durWarnings, analyzing, mfdsLoading, onCameraCapture, onGalleryUpload, onChat, onHistory, onRetry, previewUrl, logCount, symptom, onSymptomChange, onLogoTap, onCorrection, capturedImageBase64 }) {
+function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combinedAnalysis, durWarnings, analyzing, mfdsLoading, onCameraCapture, onGalleryUpload, onChat, onHistory, onRetry, previewUrl, logCount, symptom, onSymptomChange, onLogoTap, onCorrection, capturedImageBase64, currentUser, isGuest, userRole, onLogout, onLoginRequest, onAdmin }) {
   const [selectedPillIdx, setSelectedPillIdx] = useState(0)
   const fileInputRef = useRef(null)
   const [step, setStep] = useState(previewUrl || analysisResult ? 2 : 1)
@@ -1744,9 +2024,7 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combi
   const selectedPill = pillResults[selectedPillIdx] || pillResults[0]
 
   useEffect(() => {
-    if ((previewUrl || analyzing || mfdsLoading) && step === 1) {
-      setStep(2)
-    }
+    if ((previewUrl || analyzing || mfdsLoading) && step === 1) setStep(2)
   }, [previewUrl, analyzing, mfdsLoading, step])
 
   const handleFileChange = (e) => {
@@ -1759,17 +2037,57 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combi
     <div className="px-5 pt-6 pb-5 bg-gradient-to-b from-[#0192F5] to-[#40BEFD]">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <img src="/logo.png" alt="이거돼?" onClick={onLogoTap} className="w-10 h-10 rounded-2xl object-cover cursor-pointer active:scale-90 transition-transform" />
+          <img src="/logo.png" alt="이거돼?" onClick={onLogoTap}
+            className="w-10 h-10 rounded-2xl object-cover cursor-pointer active:scale-90 transition-transform"
+            onError={e => { e.target.style.display='none' }} />
           <div>
             <h1 className="text-white font-black text-lg leading-tight">이거 돼?</h1>
             <p className="text-white/70 text-xs">AI 약물 판독 서비스</p>
           </div>
         </div>
-        <button onClick={onHistory} className="relative w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center">
-          <History size={20} className="text-white" />
-          {logCount > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-400 text-white text-[10px] font-bold rounded-full flex items-center justify-center">{Math.min(logCount, 9)}</span>}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* 관리자 버튼 (admin만 표시) */}
+          {userRole === 'admin' && (
+            <button onClick={onAdmin}
+              className="w-9 h-9 rounded-2xl bg-white/20 flex items-center justify-center"
+              title="관리자 대시보드">
+              <Shield size={16} className="text-white" />
+            </button>
+          )}
+          {/* 히스토리 */}
+          <button onClick={onHistory}
+            className="relative w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center">
+            <History size={20} className="text-white" />
+            {logCount > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-400 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                {Math.min(logCount, 9)}
+              </span>
+            )}
+          </button>
+          {/* 로그인/로그아웃 */}
+          {isGuest ? (
+            <button onClick={onLoginRequest}
+              className="h-9 px-3 rounded-2xl bg-white text-[#0192F5] text-xs font-black flex items-center gap-1 active:scale-95 transition-transform">
+              로그인
+            </button>
+          ) : (
+            <button onClick={onLogout}
+              className="w-9 h-9 rounded-2xl bg-white/20 flex items-center justify-center"
+              title="로그아웃">
+              <LogOut size={16} className="text-white" />
+            </button>
+          )}
+        </div>
       </div>
+      {/* 게스트 배너 */}
+      {isGuest && (
+        <div className="mt-3 bg-white/15 rounded-2xl px-3 py-2 flex items-center gap-2">
+          <span className="text-white/80 text-xs">👤 게스트 모드 — 분석 기록이 저장되지 않아요</span>
+          <button onClick={onLoginRequest} className="ml-auto text-[10px] font-bold text-white underline shrink-0">
+            로그인
+          </button>
+        </div>
+      )}
     </div>
   )
 
@@ -1922,78 +2240,154 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combi
 // ─── 메인 앱 ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [userConditions, setUserConditions] = useState('일반 사용자')
-  const [view, setView] = useState('home')
-  const [previewUrl, setPreviewUrl] = useState(null)
-  const [analyzing, setAnalyzing] = useState(false)
-  const [mfdsLoading, setMfdsLoading] = useState(false)
+  const [view, setView]           = useState('home')
+  const [previewUrl, setPreviewUrl]         = useState(null)
+  const [analyzing, setAnalyzing]           = useState(false)
+  const [mfdsLoading, setMfdsLoading]       = useState(false)
   const [analysisResult, setAnalysisResult] = useState(null)
-  const [mfdsInfo, setMfdsInfo] = useState(null)
-  const [pillResults, setPillResults] = useState([])
+  const [mfdsInfo, setMfdsInfo]             = useState(null)
+  const [pillResults, setPillResults]       = useState([])
   const [combinedAnalysis, setCombinedAnalysis] = useState(null)
-  const [durWarnings, setDurWarnings] = useState([])
-  const [analysisLogs, setAnalysisLogs] = useState([])
-  const [currentUser, setCurrentUser] = useState(null)
-  const [authReady, setAuthReady] = useState(false)
-  const [symptom, setSymptom] = useState('')
-  const [showAdminPin, setShowAdminPin] = useState(false)
-  const [adminPin, setAdminPin] = useState('')
+  const [durWarnings, setDurWarnings]       = useState([])
+  const [analysisLogs, setAnalysisLogs]     = useState([])
+  const [corrections, setCorrections]       = useState([])
+  const [allUsers, setAllUsers]             = useState([])
+  const [currentUser, setCurrentUser]       = useState(null)   // null = 로딩중
+  const [userRole, setUserRole]             = useState('user')
+  const [authReady, setAuthReady]           = useState(false)
+  const [isGuest, setIsGuest]               = useState(false)
+  const [symptom, setSymptom]               = useState('')
   const [showOnboarding, setShowOnboarding] = useState(!localStorage.getItem('igodae_onboarding_done'))
-  const [logoTapCount, setLogoTapCount] = useState(0)
-  const logoTapTimer = useRef(null)
   const [capturedImageBase64, setCapturedImageBase64] = useState(null)
+  const logoTapTimer = useRef(null)
+  const [logoTapCount, setLogoTapCount]     = useState(0)
 
+  // ── Auth 상태 구독 ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!auth) { setAuthReady(true); return }
     const unsub = onAuthStateChanged(auth, async (user) => {
-      if (user) { setCurrentUser(user); setAuthReady(true) }
-      else {
-        try { const cred = await signInAnonymously(auth); setCurrentUser(cred.user) }
-        catch (e) { console.warn('익명 로그인 실패:', e.message) }
-        finally { setAuthReady(true) }
+      if (user) {
+        setCurrentUser(user)
+        setIsGuest(false)
+        // Firestore에서 role 조회 (없으면 'user')
+        try {
+          const snap = await getDoc(doc(db, 'users', user.uid))
+          if (snap.exists()) {
+            setUserRole(snap.data().role || 'user')
+            // 마지막 로그인 시간 업데이트
+            await updateDoc(doc(db, 'users', user.uid), { lastLogin: serverTimestamp() })
+          } else {
+            setUserRole('user')
+          }
+        } catch (e) { console.warn('role 로드 실패:', e.message) }
+      } else {
+        // 로그아웃 → 게스트 상태도 초기화
+        setCurrentUser(null)
+        setUserRole('user')
       }
+      setAuthReady(true)
     })
     return unsub
   }, [])
 
+  // ── 분석 기록 구독 (로그인 유저만 / 관리자는 전체, 일반은 본인 것) ───────────
   useEffect(() => {
-    if (!db || !currentUser || !authReady) return
-    const q = query(LOGS_PATH(), orderBy('createdAt', 'desc'), limit(20))
+    if (!db || !currentUser || isGuest) { setAnalysisLogs([]); return }
+    const q = query(LOGS_PATH(), orderBy('createdAt', 'desc'), limit(200))
     const unsub = onSnapshot(q, snap => {
-      setAnalysisLogs(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+      const all = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      // 관리자는 전체, 일반 유저는 본인 것만
+      setAnalysisLogs(
+        userRole === 'admin' ? all : all.filter(log => log.userId === currentUser.uid)
+      )
     }, err => console.warn('Firestore 구독 에러:', err.message))
     return unsub
-  }, [currentUser, authReady])
+  }, [currentUser, isGuest, userRole])
 
-  const saveToFirestore = useCallback(async (result) => {
-    if (!db || !currentUser) return
+  // ── 관리자 전용: corrections + 전체 유저 목록 구독 ─────────────────────────
+  useEffect(() => {
+    if (!db || userRole !== 'admin') { setCorrections([]); setAllUsers([]); return }
+
+    // corrections 실시간
+    const q1 = query(CORRECTIONS_PATH(), orderBy('createdAt', 'desc'), limit(50))
+    const unsub1 = onSnapshot(q1, snap => {
+      setCorrections(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    })
+
+    // 전체 유저 목록 (1회 조회)
+    const loadUsers = async () => {
+      try {
+        const snap = await getDocs(USERS_PATH())
+        const users = snap.docs.map(d => ({ uid: d.id, ...d.data() }))
+        setAllUsers(users.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)))
+      } catch (e) { console.warn('유저 목록 로드 실패:', e.message) }
+    }
+    loadUsers()
+
+    return () => { unsub1() }
+  }, [userRole])
+
+  // ── 이미지 압축 → Base64 변환 (최대 400px, quality 0.6) ─────────────────────
+  const compressImageToBase64 = useCallback((blob, maxWidth = 400, quality = 0.6) => {
+    return new Promise((resolve) => {
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+      const img = new Image()
+      img.onload = () => {
+        const ratio = Math.min(maxWidth / img.width, 1)
+        canvas.width  = Math.round(img.width  * ratio)
+        canvas.height = Math.round(img.height * ratio)
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        resolve(canvas.toDataURL('image/jpeg', quality))
+      }
+      img.onerror = () => resolve(null)
+      img.src = URL.createObjectURL(blob)
+    })
+  }, [])
+
+  // ── Base64 Firestore 저장 (Storage 미사용) ───────────────────────────────────
+  const saveToFirestore = useCallback(async (result, blob) => {
+    if (!db || !currentUser || isGuest) return
     try {
+      let imageBase64 = null
+      if (blob) {
+        imageBase64 = await compressImageToBase64(blob)
+      }
       await addDoc(LOGS_PATH(), {
-        userId: currentUser.uid,
-        statusCode: result.statusCode,
-        statusText: result.statusText,
-        summary: result.summary,
-        confidence: result.confidence,
+        userId:        currentUser.uid,
+        statusCode:    result.statusCode,
+        statusText:    result.statusText,
+        summary:       result.summary,
+        confidence:    result.confidence,
+        imageBase64:   imageBase64,
         userConditions,
-        createdAt: serverTimestamp(),
+        createdAt:     serverTimestamp(),
       })
     } catch (e) { console.warn('Firestore 저장 실패:', e.message) }
-  }, [currentUser, userConditions])
+  }, [currentUser, isGuest, userConditions, compressImageToBase64])
 
+  // ── 정정 저장 ────────────────────────────────────────────────────────────────
   const saveCorrection = useCallback(async ({ correctDrugName, originalResult, originalConfidence, image }) => {
-    if (!db || !currentUser) return
+    if (!db || !currentUser || isGuest) return
     try {
       await addDoc(CORRECTIONS_PATH(), {
         userId: currentUser.uid,
-        correctDrugName,
-        originalResult,
-        originalConfidence,
+        correctDrugName, originalResult, originalConfidence,
         imageBase64: image || null,
         createdAt: serverTimestamp(),
       })
-      console.log('✅ 정정 데이터 저장:', correctDrugName)
     } catch (e) { console.warn('정정 저장 실패:', e.message) }
-  }, [currentUser])
+  }, [currentUser, isGuest])
 
+  // ── 관리자: 유저 role 변경 ───────────────────────────────────────────────────
+  const handleUpdateUserRole = useCallback(async (uid, newRole) => {
+    try {
+      await updateDoc(doc(db, 'users', uid), { role: newRole })
+      setAllUsers(prev => prev.map(u => u.uid === uid ? { ...u, role: newRole } : u))
+    } catch (e) { console.warn('role 업데이트 실패:', e.message) }
+  }, [])
+
+  // ── 이미지 처리 ──────────────────────────────────────────────────────────────
   const processImage = useCallback((file) => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader()
@@ -2006,73 +2400,47 @@ export default function App() {
     })
   }, [])
 
-  const runAnalysis = useCallback(async (base64, mimeType = 'image/jpeg') => {
+  const runAnalysis = useCallback(async (base64, mimeType = 'image/jpeg', blob = null) => {
     setAnalyzing(true)
-    setMfdsInfo(null)
-    setAnalysisResult(null)
-    setPillResults([])
-    setDurWarnings([])
+    setMfdsInfo(null); setAnalysisResult(null); setPillResults([]); setDurWarnings([])
     setCapturedImageBase64(base64)
 
     let aiResult
     const imageDataUrl = `data:${mimeType};base64,${base64}`
-
-    // ── 1단계: DL 모델 시도 (결정적, 같은 사진 = 같은 결과) ──
     const dlResult = await fetchModelInference(imageDataUrl)
 
     if (dlResult && !dlResult.isPill) {
-      // OOD 방어: 약이 아닌 이미지
-      setAnalysisResult({
-        statusCode: 'unidentified',
-        summary: '약이 아닙니다',
-        description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
-        confidence: 0,
-      })
-      setAnalyzing(false)
-      return
+      setAnalysisResult({ statusCode: 'unidentified', summary: '약이 아닙니다', description: '실제 약 이미지를 촬영해주세요.', confidence: 0 })
+      setAnalyzing(false); return
     }
 
     if (dlResult?.isPill && dlResult.pills?.length > 0) {
-      // DL 모델이 약으로 인식 → confidence 구간별 처리
       const conf = dlResult.confidence
       const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
-      console.log(`🧠 DL 모델 매칭 (유사도: ${(conf * 100).toFixed(1)}%, 확신도: ${confLabel})`)
       const topPill = dlResult.pills[0]
       aiResult = {
-        pills: [{
-          drugName: topPill.drugName,
-          color: '', shape: '', form: '', imprint: '', size: '',
-          confidence: topPill.similarity,
-          description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
-          fromDL: true,
-        }],
-        totalCount: 1,
-        symptomHint: '',
-        dlConfidenceLevel: confLabel,
+        pills: [{ drugName: topPill.drugName, color: '', shape: '', form: '', imprint: '', size: '', confidence: topPill.similarity, description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`, fromDL: true }],
+        totalCount: 1, symptomHint: '', dlConfidenceLevel: confLabel,
       }
     } else {
-      // ── DL 모델 미연결 또는 실패 → 기존 Groq 단독 ──
       try {
         const data = await safeFetchGroq({
           model: GROQ_VISION_MODEL,
           messages: [{ role: 'user', content: [
             { type: 'text', text: buildVisionPrompt(userConditions, symptom) },
-            { type: 'image_url', image_url: { url: imageDataUrl } }
+            { type: 'image_url', image_url: { url: imageDataUrl } },
           ]}],
-          temperature: 0.1,
-          max_tokens: 1000,
+          temperature: 0.1, max_tokens: 1000,
         })
         const raw = data.choices?.[0]?.message?.content || '{}'
         aiResult = JSON.parse(raw.replace(/```json|```/g, '').trim())
       } catch (e) {
         setAnalysisResult({ statusCode: 'unidentified', summary: '분석 실패', description: e.message, confidence: 0 })
-        setAnalyzing(false)
-        return
+        setAnalyzing(false); return
       }
     }
 
     setAnalyzing(false)
-
     if (!aiResult.pills || aiResult.pills.length === 0) {
       setAnalysisResult({ statusCode: 'unidentified', summary: '알약 미인식', description: '알약이 잘 보이도록 다시 촬영해주세요.', confidence: 0 })
       return
@@ -2080,78 +2448,106 @@ export default function App() {
 
     setMfdsLoading(true)
     try {
-      const results = await Promise.all(
-        aiResult.pills.map(pill => analyzeSinglePill(pill, aiResult.symptomHint))
-      )
-      setPillResults(results)
-      setAnalysisResult(results[0])
-
+      const results = await Promise.all(aiResult.pills.map(pill => analyzeSinglePill(pill, aiResult.symptomHint)))
+      setPillResults(results); setAnalysisResult(results[0])
       const combined = await analyzePillsCombined(results, symptom)
       setCombinedAnalysis(combined)
-
-      // DUR 체크
       const userProfile = {
         isPregnant: userConditions.includes('임신') || userConditions.includes('임부'),
         isElderly:  userConditions.includes('노인') || userConditions.includes('고령'),
       }
       const dur = await runDurCheck(results, userProfile)
       setDurWarnings(dur)
-
       if (results[0]?.statusCode !== 'unidentified') {
-        await saveToFirestore(results[0])
+        await saveToFirestore(results[0], blob)  // blob 전달 → Base64 압축 후 Firestore 저장
       }
-    } catch (e) {
-      console.warn('분석 실패:', e.message)
-    } finally {
-      setMfdsLoading(false)
-    }
+    } catch (e) { console.warn('분석 실패:', e.message) }
+    finally { setMfdsLoading(false) }
   }, [userConditions, symptom, saveToFirestore])
 
   const handleCameraCapture = useCallback(async (blob) => {
     setView('home')
     const { base64, previewUrl } = await processImage(blob)
-    setPreviewUrl(previewUrl)
-    setAnalysisResult(null)
-    await runAnalysis(base64, 'image/jpeg')
+    setPreviewUrl(previewUrl); setAnalysisResult(null)
+    await runAnalysis(base64, 'image/jpeg', blob)
   }, [processImage, runAnalysis])
 
   const handleGalleryUpload = useCallback(async (file) => {
     const { base64, previewUrl } = await processImage(file)
-    setPreviewUrl(previewUrl)
-    setAnalysisResult(null)
-    await runAnalysis(base64, file.type || 'image/jpeg')
+    setPreviewUrl(previewUrl); setAnalysisResult(null)
+    await runAnalysis(base64, file.type || 'image/jpeg', file)
   }, [processImage, runAnalysis])
-
-  const handleOnboardingComplete = () => {
-    localStorage.setItem('igodae_onboarding_done', 'true')
-    setShowOnboarding(false)
-  }
 
   const handleLogoTap = () => {
     const next = logoTapCount + 1
     setLogoTapCount(next)
     if (logoTapTimer.current) clearTimeout(logoTapTimer.current)
     logoTapTimer.current = setTimeout(() => setLogoTapCount(0), 2000)
-    if (next >= 5) { setLogoTapCount(0); setShowAdminPin(true); setAdminPin('') }
   }
 
-  const handleAdminPin = (pin) => {
-    if (pin === '1234') { setShowAdminPin(false); setView('admin') }
-    else if (pin.length === 4) setAdminPin('')
-  }
-
-  const handleHistorySelect = (log) => {
-    setAnalysisResult({ ...log })
-    setMfdsInfo(null)
-    setPreviewUrl(null)
+  const handleLogout = async () => {
+    try { await signOut(auth) } catch (e) { console.warn('로그아웃 실패:', e.message) }
+    // 뷰 및 분석 상태 전체 초기화
     setView('home')
+    setIsGuest(false)
+    setPreviewUrl(null)
+    setAnalysisResult(null)
+    setMfdsInfo(null)
+    setPillResults([])
+    setCombinedAnalysis(null)
+    setDurWarnings([])
+    setCapturedImageBase64(null)
+    setSymptom('')
   }
 
-  if (showOnboarding) return <OnboardingSlides onComplete={handleOnboardingComplete} />
-  if (view === 'admin') return <AdminView logs={analysisLogs} onBack={() => setView('home')} />
+  // ── 로딩 중 ─────────────────────────────────────────────────────────────────
+  if (!authReady) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gradient-to-b from-[#0192F5] to-[#40BEFD]">
+        <Loader2 className="animate-spin text-white" size={40} />
+      </div>
+    )
+  }
+
+  // ── 미로그인 + 비게스트 → AuthView ──────────────────────────────────────────
+  if (!currentUser && !isGuest) {
+    return <AuthView onGuest={() => {
+      setView('home')
+      setPreviewUrl(null)
+      setAnalysisResult(null)
+      setMfdsInfo(null)
+      setPillResults([])
+      setCombinedAnalysis(null)
+      setDurWarnings([])
+      setCapturedImageBase64(null)
+      setSymptom('')
+      setIsGuest(true)
+    }} />
+  }
+
+  // ── 온보딩 ──────────────────────────────────────────────────────────────────
+  if (showOnboarding) {
+    return <OnboardingSlides onComplete={() => { localStorage.setItem('igodae_onboarding_done', 'true'); setShowOnboarding(false) }} />
+  }
+
+  // ── 뷰 라우팅 ────────────────────────────────────────────────────────────────
+  if (view === 'admin' && userRole === 'admin') {
+    return (
+      <AdminView
+        logs={analysisLogs} corrections={corrections} allUsers={allUsers}
+        onBack={() => setView('home')} onUpdateUserRole={handleUpdateUserRole}
+      />
+    )
+  }
   if (view === 'camera') return <CameraView onCapture={handleCameraCapture} onCancel={() => setView('home')} />
   if (view === 'chat' && analysisResult) return <ChatView result={analysisResult} mfdsInfo={mfdsInfo} userConditions={userConditions} onBack={() => setView('home')} />
-  if (view === 'history') return <HistoryView logs={analysisLogs} onSelect={handleHistorySelect} onBack={() => setView('home')} />
+  if (view === 'history') return (
+    <HistoryView
+      logs={analysisLogs} isGuest={isGuest}
+      onSelect={(log) => { setAnalysisResult({ ...log }); setMfdsInfo(null); setPreviewUrl(null); setView('home') }}
+      onBack={() => setView('home')}
+    />
+  )
 
   return (
     <>
@@ -2165,37 +2561,12 @@ export default function App() {
         previewUrl={previewUrl} logCount={analysisLogs.length}
         symptom={symptom} onSymptomChange={setSymptom} onLogoTap={handleLogoTap}
         onCorrection={saveCorrection} capturedImageBase64={capturedImageBase64}
+        /* 새로 추가된 props */
+        currentUser={currentUser} isGuest={isGuest} userRole={userRole}
+        onLogout={handleLogout} onLoginRequest={() => { setIsGuest(false) }}
+        onAdmin={() => setView('admin')}
       />
-      {showAdminPin && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center px-6">
-          <div className="bg-white rounded-3xl p-6 w-full max-w-xs space-y-4">
-            <p className="font-black text-slate-800 text-center text-lg">🔐 관리자 인증</p>
-            <p className="text-slate-400 text-xs text-center">4자리 비밀번호를 입력하세요</p>
-            <div className="flex justify-center gap-3">
-              {[0,1,2,3].map(i => (
-                <div key={i} className="w-10 h-10 rounded-2xl border-2 border-slate-200 flex items-center justify-center">
-                  <span className="text-lg">{adminPin[i] ? '●' : ''}</span>
-                </div>
-              ))}
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              {['1','2','3','4','5','6','7','8','9','','0','⌫'].map((k, i) => (
-                <button key={i} onClick={() => {
-                  if (k === '⌫') setAdminPin(p => p.slice(0,-1))
-                  else if (k && adminPin.length < 4) {
-                    const next = adminPin + k
-                    setAdminPin(next)
-                    if (next.length === 4) handleAdminPin(next)
-                  }
-                }} className={`py-3 rounded-2xl font-bold text-lg ${k ? 'bg-slate-100 text-slate-800 active:bg-slate-200' : ''}`}>
-                  {k}
-                </button>
-              ))}
-            </div>
-            <button onClick={() => setShowAdminPin(false)} className="w-full py-2 text-slate-400 text-sm">취소</button>
-          </div>
-        </div>
-      )}
     </>
   )
 }
+
