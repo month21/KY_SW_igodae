@@ -21,6 +21,7 @@ import { initializeApp, getApps } from 'firebase/app'
 import {
   getAuth, onAuthStateChanged,
   signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut,
+  sendPasswordResetEmail,
 } from 'firebase/auth'
 import {
   getFirestore, collection, addDoc, query, orderBy, limit,
@@ -92,19 +93,30 @@ function getAuthErrorMsg(code) {
   return map[code] || '인증 오류가 발생했습니다.'
 }
 
-// ─── AuthView (로그인 / 회원가입 / 게스트) ────────────────────────────────────
+// ─── AuthView (로그인 / 회원가입 / 비밀번호 찾기 / 게스트) ─────────────────────
 function AuthView({ onGuest }) {
+  // tab: 'login' | 'signup'  /  showReset: boolean
   const [tab, setTab]           = useState('login')
+  const [showReset, setShowReset] = useState(false)
   const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState('')
+  const [resetSent, setResetSent] = useState(false)
 
-  const handleSubmit = async (e) => {
-    e.preventDefault()
+  const switchTab = (next) => { setTab(next); setError(''); setEmail(''); setPassword('') }
+  const openReset = () => { setShowReset(true); setError(''); setResetSent(false) }
+  const closeReset = () => { setShowReset(false); setError('') }
+
+  const handleSubmit = async () => {
+    if (!email.trim()) { setError('이메일을 입력해주세요.'); return }
+    if (!showReset && !password) { setError('비밀번호를 입력해주세요.'); return }
     setLoading(true); setError('')
     try {
-      if (tab === 'login') {
+      if (showReset) {
+        await sendPasswordResetEmail(auth, email.trim())
+        setResetSent(true)
+      } else if (tab === 'login') {
         await signInWithEmailAndPassword(auth, email.trim(), password)
       } else {
         const cred = await createUserWithEmailAndPassword(auth, email.trim(), password)
@@ -118,66 +130,165 @@ function AuthView({ onGuest }) {
   }
 
   return (
-    <div className="min-h-[100dvh] flex flex-col bg-white">
-      <div className="bg-gradient-to-b from-[#0192F5] to-[#40BEFD] px-6 pt-16 pb-12 flex flex-col items-center gap-3">
-        <div className="w-16 h-16 rounded-3xl bg-white/20 flex items-center justify-center text-4xl shadow-lg">💊</div>
-        <h1 className="text-3xl font-black text-white tracking-tight">이거돼?</h1>
-        <p className="text-white/80 text-sm font-medium">AI 복약 가이드 서비스</p>
+    <div className="h-[100dvh] flex flex-col bg-white overflow-hidden">
+
+      {/* ── 상단 헤더 (앱과 동일한 그라데이션) ── */}
+      <div className="px-5 pt-12 pb-10 bg-gradient-to-b from-[#0192F5] to-[#40BEFD] flex flex-col items-center gap-3 flex-shrink-0">
+        {/* 로고 */}
+        <div className="relative">
+          <img
+            src="/logo.png"
+            alt="이거돼?"
+            className="object-cover shadow-2xl"
+            style={{ width: 84, height: 84, borderRadius: 24 }}
+            onError={e => { e.currentTarget.style.display = 'none'; e.currentTarget.nextSibling.style.display = 'flex' }}
+          />
+          <div
+            className="items-center justify-center text-4xl shadow-xl"
+            style={{ display: 'none', width: 84, height: 84, borderRadius: 24, background: 'rgba(255,255,255,0.25)' }}
+          >💊</div>
+        </div>
+        <div className="text-center">
+          <h1 className="text-white font-black text-2xl leading-tight">이거 돼?</h1>
+          <p className="text-white/75 text-sm mt-0.5">AI 약물 판독 서비스</p>
+        </div>
       </div>
-      <div className="flex-1 px-5 -mt-6">
-        <div className="bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden">
-          <div className="flex border-b border-slate-100">
-            {[['login','로그인'],['signup','회원가입']].map(([key,label]) => (
-              <button key={key} onClick={() => { setTab(key); setError('') }}
-                className={`flex-1 py-4 text-sm font-bold transition-colors ${tab===key?'text-[#0192F5] border-b-2 border-[#0192F5]':'text-slate-400'}`}>
-                {label}
+
+      {/* ── 하단 폼 영역 ── */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="px-5 pt-6 pb-10 flex flex-col gap-5">
+
+          {/* ── 비밀번호 재설정 패널 ── */}
+          {showReset ? (
+            <div className="space-y-4">
+              <button onClick={closeReset} className="flex items-center gap-1.5 text-sm text-slate-500 font-semibold">
+                <ChevronLeft size={16} /> 돌아가기
               </button>
-            ))}
-          </div>
-          <form onSubmit={handleSubmit} className="p-5 space-y-3">
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-400 pl-1">이메일</label>
-              <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
-                placeholder="example@email.com" autoComplete="email" required
-                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:border-[#0192F5] transition-colors"/>
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-400 pl-1">비밀번호</label>
-              <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
-                placeholder={tab==='login'?'비밀번호 입력':'6자 이상 입력'} required
-                autoComplete={tab==='login'?'current-password':'new-password'}
-                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:border-[#0192F5] transition-colors"/>
-            </div>
-            {error && (
-              <div className="flex items-center gap-2 bg-red-50 border border-red-100 rounded-2xl px-4 py-2.5">
-                <XCircle size={14} className="text-red-500 shrink-0"/>
-                <p className="text-xs font-bold text-red-600">{error}</p>
+              <div>
+                <p className="font-black text-slate-800 text-lg">비밀번호 재설정</p>
+                <p className="text-xs text-slate-400 mt-1">가입한 이메일로 재설정 링크를 보내드려요</p>
               </div>
-            )}
-            <button type="submit" disabled={loading}
-              className="w-full py-3.5 bg-[#0192F5] text-white font-black text-sm rounded-2xl shadow-md shadow-blue-100 active:scale-[0.98] transition-transform disabled:opacity-50 mt-1">
-              {loading?'처리 중...':tab==='login'?'로그인':'회원가입하고 시작하기'}
-            </button>
-          </form>
+              {resetSent ? (
+                <div className="bg-blue-50 rounded-3xl p-6 text-center space-y-3 border border-blue-100">
+                  <div className="text-4xl">📧</div>
+                  <div>
+                    <p className="font-bold text-slate-800 text-sm">메일을 확인해주세요!</p>
+                    <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                      <span className="text-[#0192F5] font-semibold">{email}</span>으로<br/>재설정 링크를 전송했어요.
+                    </p>
+                  </div>
+                  <button onClick={closeReset}
+                    className="w-full py-3 rounded-2xl text-sm font-bold text-white"
+                    style={{ background: 'linear-gradient(135deg, #0192F5, #40BEFD)' }}>
+                    로그인으로 돌아가기
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <InputField label="이메일 주소" type="email" value={email} onChange={setEmail} placeholder="example@email.com" autoComplete="email" />
+                  {error && <ErrorMsg msg={error} />}
+                  <SubmitBtn loading={loading} onClick={handleSubmit} label="재설정 메일 보내기" />
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* ── 탭 ── */}
+              <div className="flex bg-slate-100 rounded-2xl p-1 gap-1">
+                {[['login','로그인'],['signup','회원가입']].map(([key, label]) => (
+                  <button key={key} onClick={() => switchTab(key)}
+                    className="flex-1 py-2.5 rounded-xl text-sm font-bold transition-all"
+                    style={tab === key ? { background: '#fff', color: '#0192F5', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' } : { color: '#94a3b8' }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* ── 입력 폼 ── */}
+              <div className="space-y-3">
+                <InputField label="이메일 주소" type="email" value={email} onChange={setEmail} placeholder="example@email.com" autoComplete="email" />
+                <div>
+                  <InputField
+                    label={
+                      <div className="flex items-center justify-between">
+                        <span>비밀번호</span>
+                        {tab === 'login' && (
+                          <button type="button" onClick={openReset}
+                            className="text-[11px] font-bold" style={{ color: '#0192F5' }}>
+                            비밀번호 찾기
+                          </button>
+                        )}
+                      </div>
+                    }
+                    type="password" value={password} onChange={setPassword}
+                    placeholder={tab === 'login' ? '비밀번호 입력' : '6자 이상 입력'}
+                    autoComplete={tab === 'login' ? 'current-password' : 'new-password'}
+                  />
+                  {tab === 'signup' && (
+                    <p className="text-[11px] text-slate-400 mt-1.5 ml-1">6자 이상의 비밀번호를 사용해주세요</p>
+                  )}
+                </div>
+                {error && <ErrorMsg msg={error} />}
+                <SubmitBtn loading={loading} onClick={handleSubmit}
+                  label={tab === 'login' ? '로그인' : '회원가입'} />
+              </div>
+
+              {/* ── 구분선 ── */}
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-px bg-slate-100" />
+                <span className="text-[11px] text-slate-400 font-semibold">또는</span>
+                <div className="flex-1 h-px bg-slate-100" />
+              </div>
+
+              {/* ── 게스트 ── */}
+              <button onClick={onGuest}
+                className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl text-sm font-bold border border-slate-200 text-slate-500 bg-slate-50 active:scale-[0.98] transition-all">
+                <Zap size={15} className="text-amber-400 fill-amber-400" />
+                로그인 없이 둘러보기
+              </button>
+              <p className="text-center text-[11px] text-slate-400 -mt-2">게스트는 분석 기록이 저장되지 않아요</p>
+            </>
+          )}
         </div>
-        <div className="flex items-center gap-3 my-4 px-1">
-          <div className="flex-1 h-px bg-slate-200"/>
-          <span className="text-xs text-slate-400 font-medium">또는</span>
-          <div className="flex-1 h-px bg-slate-200"/>
-        </div>
-        <button onClick={onGuest}
-          className="w-full py-3.5 rounded-2xl border-2 border-slate-200 text-slate-600 font-bold text-sm flex items-center justify-center gap-2 active:bg-slate-50 transition-colors">
-          <span>👤</span> 로그인 없이 둘러보기
-        </button>
-        <p className="text-center text-xs text-slate-400 mt-3 leading-relaxed">게스트는 분석 기록이 저장되지 않아요</p>
-        {tab==='signup' && (
-          <p className="text-center text-xs text-slate-300 mt-2 leading-relaxed">
-            관리자 계정은 가입 후 Firebase 콘솔에서 role을 'admin'으로 변경해주세요
-          </p>
-        )}
       </div>
-      <div className="h-8"/>
     </div>
+  )
+}
+
+// ── 공용 InputField ─────────────────────────────────────────────────────────
+function InputField({ label, type, value, onChange, placeholder, autoComplete }) {
+  return (
+    <div>
+      {label && (
+        typeof label === 'string'
+          ? <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">{label}</p>
+          : <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">{label}</div>
+      )}
+      <input
+        type={type} value={value} onChange={e => onChange(e.target.value)}
+        placeholder={placeholder} autoComplete={autoComplete}
+        className="w-full px-4 py-3.5 rounded-2xl text-sm bg-slate-50 border border-slate-200 placeholder-slate-300 outline-none transition-all"
+        onFocus={e => { e.target.style.borderColor = '#0192F5'; e.target.style.background = '#fff'; e.target.style.boxShadow = '0 0 0 3px rgba(1,146,245,0.08)' }}
+        onBlur={e => { e.target.style.borderColor = '#e2e8f0'; e.target.style.background = '#f8fafc'; e.target.style.boxShadow = 'none' }}
+      />
+    </div>
+  )
+}
+function ErrorMsg({ msg }) {
+  return (
+    <div className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-red-50 border border-red-100">
+      <XCircle size={14} className="text-red-400 shrink-0" />
+      <p className="text-xs font-bold text-red-500">{msg}</p>
+    </div>
+  )
+}
+function SubmitBtn({ loading, onClick, label }) {
+  return (
+    <button onClick={onClick} disabled={loading}
+      className="w-full flex items-center justify-center py-4 rounded-2xl text-sm font-extrabold text-white transition-all active:scale-[0.98] disabled:opacity-50"
+      style={{ background: 'linear-gradient(135deg, #0192F5, #40BEFD)', boxShadow: '0 6px 20px rgba(1,146,245,0.30)' }}>
+      {loading ? <Loader2 className="animate-spin" size={18} /> : label}
+    </button>
   )
 }
 
@@ -1594,7 +1705,7 @@ function ChatView({ result, mfdsInfo, userConditions, onBack }) {
 }
 
 // ─── 히스토리 뷰 (Base64 썸네일 + 게스트 안내) ──────────────────────────────
-function HistoryView({ logs, onSelect, onBack, isGuest }) {
+function HistoryView({ logs, onSelect, onBack, isGuest, onLoginRequest }) {
   // 게스트인 경우 로그인 유도
   if (isGuest) {
     return (
@@ -1611,12 +1722,11 @@ function HistoryView({ logs, onSelect, onBack, isGuest }) {
             <p className="font-bold text-slate-700 text-base">로그인이 필요해요</p>
             <p className="text-xs leading-relaxed text-slate-400">분석 기록은 로그인한 유저만 저장돼요.<br/>회원가입하면 내 복약 히스토리를 볼 수 있어요.</p>
           </div>
-          <button onClick={onBack}
+          <button onClick={onLoginRequest}
             className="px-6 py-3 bg-[#0192F5] text-white rounded-2xl font-bold text-sm active:scale-95 transition-transform">
             로그인하러 가기
           </button>
         </div>
-        <DisclaimerBar />
       </div>
     )
   }
@@ -1637,7 +1747,6 @@ function HistoryView({ logs, onSelect, onBack, isGuest }) {
           <p className="text-sm font-medium">아직 분석 기록이 없어요</p>
           <p className="text-xs text-center leading-relaxed">약품 사진을 촬영하면<br/>분석 결과가 여기에 저장됩니다.</p>
         </div>
-        <DisclaimerBar />
       </div>
     )
   }
@@ -1691,7 +1800,6 @@ function HistoryView({ logs, onSelect, onBack, isGuest }) {
           )
         })}
       </div>
-      <DisclaimerBar />
     </div>
   )
 }
@@ -1728,26 +1836,28 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
   ]
 
   return (
-    <div className="flex flex-col h-[100dvh] bg-slate-900">
+    <div className="flex flex-col h-[100dvh] bg-[#0f172a]">
       {/* 헤더 */}
-      <div className="px-5 pt-6 pb-0 bg-slate-800 border-b border-slate-700 sticky top-0 z-10">
+      <div className="px-5 pt-6 pb-0 bg-gradient-to-b from-[#1e293b] to-[#0f172a] border-b border-white/5 sticky top-0 z-10">
         <div className="flex items-center gap-3 pb-3">
-          <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-slate-700 flex items-center justify-center">
+          <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-white/10 flex items-center justify-center">
             <ChevronLeft size={20} className="text-white" />
           </button>
-          <Shield size={18} className="text-[#0192F5]" />
+          <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-[#0192F5] to-[#40BEFD] flex items-center justify-center">
+            <Shield size={16} className="text-white" />
+          </div>
           <div className="flex-1">
             <p className="font-bold text-white text-sm">Master 대시보드</p>
             <p className="text-xs text-slate-400">이거돼? 서비스 현황</p>
           </div>
-          <span className="bg-blue-900 text-blue-300 text-xs px-2.5 py-1 rounded-full font-bold">Admin</span>
+          <span className="bg-blue-500/20 text-blue-300 text-xs px-2.5 py-1 rounded-full font-bold border border-blue-500/30">Admin</span>
           <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
         </div>
         {/* 탭 */}
-        <div className="flex gap-1">
+        <div className="flex gap-1 pb-0">
           {TABS.map(t => (
             <button key={t.key} onClick={() => setAdminTab(t.key)}
-              className={`flex-1 py-2.5 text-xs font-bold rounded-t-xl transition-colors ${adminTab === t.key ? 'bg-slate-900 text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+              className={`flex-1 py-2.5 text-xs font-bold rounded-t-xl transition-all ${adminTab === t.key ? 'bg-[#0f172a] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
               {t.icon} {t.label}
             </button>
           ))}
@@ -1762,39 +1872,56 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
             {/* 요약 카드 2열 */}
             <div className="grid grid-cols-2 gap-3">
               {[
-                ['총 분석', `${total}회`, '#60a5fa'],
-                ['오늘 분석', `${todayCount}건`, '#34d399'],
-                ['신뢰 분석', `${trusted}건`, '#a78bfa'],
-                ['정정 요청', `${corrections.length}건`, '#fb923c'],
-              ].map(([label, value, color]) => (
-                <div key={label} className="bg-slate-800 p-4 rounded-2xl border border-slate-700">
-                  <p className="text-slate-400 text-xs font-medium">{label}</p>
-                  <p className="text-2xl font-black mt-1" style={{ color }}>{value}</p>
+                { label: '총 분석', value: `${total}회`, color: '#60a5fa', bg: 'rgba(96,165,250,0.1)', icon: '📊' },
+                { label: '오늘 분석', value: `${todayCount}건`, color: '#34d399', bg: 'rgba(52,211,153,0.1)', icon: '✨' },
+                { label: '신뢰 분석', value: `${trusted}건`, color: '#a78bfa', bg: 'rgba(167,139,250,0.1)', icon: '🎯' },
+                { label: '정정 요청', value: `${corrections.length}건`, color: '#fb923c', bg: 'rgba(251,146,60,0.1)', icon: '✏️' },
+              ].map(({ label, value, color, bg, icon }) => (
+                <div key={label} className="rounded-2xl border border-white/5 p-4 flex flex-col gap-2" style={{ background: bg }}>
+                  <div className="flex items-center justify-between">
+                    <p className="text-slate-400 text-xs font-medium">{label}</p>
+                    <span className="text-base">{icon}</span>
+                  </div>
+                  <p className="text-2xl font-black" style={{ color }}>{value}</p>
                 </div>
               ))}
             </div>
             {/* 정확도 바 */}
-            <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700 space-y-3">
-              <p className="text-slate-400 text-xs font-medium">AI 인식 정확도</p>
-              <p className="text-4xl font-black" style={{ color: avgConf >= 80 ? '#10b981' : '#f59e0b' }}>{avgConf}%</p>
-              <div className="h-2.5 bg-slate-700 rounded-full overflow-hidden">
-                <div className="h-full rounded-full transition-all" style={{ width: `${avgConf}%`, background: avgConf >= 80 ? '#10b981' : '#f59e0b' }} />
+            <div className="bg-white/5 rounded-2xl p-5 border border-white/5 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider">AI 인식 정확도</p>
+                <span className="text-xs px-2 py-0.5 rounded-full font-bold" style={{ background: avgConf >= 80 ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)', color: avgConf >= 80 ? '#10b981' : '#f59e0b' }}>
+                  {avgConf >= 80 ? '우수' : '보통'}
+                </span>
               </div>
-              <div className="flex justify-between text-center">
-                <div><p className="text-emerald-400 font-bold">{trusted}</p><p className="text-slate-500 text-xs">신뢰 (80%↑)</p></div>
-                <div><p className="text-amber-400 font-bold">{total - trusted}</p><p className="text-slate-500 text-xs">미신뢰</p></div>
+              <p className="text-4xl font-black" style={{ color: avgConf >= 80 ? '#10b981' : '#f59e0b' }}>{avgConf}<span className="text-xl ml-0.5">%</span></p>
+              <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all duration-700" style={{ width: `${avgConf}%`, background: avgConf >= 80 ? 'linear-gradient(90deg,#10b981,#34d399)' : 'linear-gradient(90deg,#f59e0b,#fbbf24)' }} />
+              </div>
+              <div className="flex justify-between pt-1">
+                <div className="text-center"><p className="text-emerald-400 font-bold text-lg">{trusted}</p><p className="text-slate-500 text-xs">신뢰 (80%↑)</p></div>
+                <div className="text-center"><p className="text-amber-400 font-bold text-lg">{total - trusted}</p><p className="text-slate-500 text-xs">미신뢰</p></div>
               </div>
             </div>
             {/* 사회 기여도 */}
-            <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700 space-y-3">
-              <p className="text-slate-400 text-xs font-medium">사회 기여도</p>
-              {[['#10b981','안전 약품 안내',safeCount],['#f59e0b','주의 필요 경고',cautionCount],['#ef4444','위험 약품 차단',dangerCount]].map(([color,label,count]) => (
-                <div key={label} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full" style={{ background: color }} />
-                    <p className="text-slate-300 text-sm">{label}</p>
+            <div className="bg-white/5 rounded-2xl p-5 border border-white/5 space-y-4">
+              <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider">사회 기여도</p>
+              {[
+                { color: '#10b981', label: '안전 약품 안내', count: safeCount, bar: 'rgba(16,185,129,0.2)' },
+                { color: '#f59e0b', label: '주의 필요 경고', count: cautionCount, bar: 'rgba(245,158,11,0.2)' },
+                { color: '#ef4444', label: '위험 약품 차단', count: dangerCount, bar: 'rgba(239,68,68,0.2)' },
+              ].map(({ color, label, count, bar }) => (
+                <div key={label} className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
+                      <p className="text-slate-300 text-sm">{label}</p>
+                    </div>
+                    <p className="font-bold text-sm" style={{ color }}>{count}건</p>
                   </div>
-                  <p className="font-bold" style={{ color }}>{count}건</p>
+                  <div className="h-1.5 rounded-full" style={{ background: bar }}>
+                    <div className="h-full rounded-full transition-all duration-700" style={{ width: total > 0 ? `${(count/total)*100}%` : '0%', background: color }} />
+                  </div>
                 </div>
               ))}
             </div>
@@ -1815,22 +1942,22 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
               const userLogs   = logCountByUser[user.uid] || 0
               const joinDate   = user.createdAt?.toDate?.()?.toLocaleDateString('ko-KR', { year: '2-digit', month: 'short', day: 'numeric' }) || '-'
               return (
-                <div key={user.uid} className="bg-slate-800 rounded-2xl border border-slate-700 p-4 space-y-3">
+                <div key={user.uid} className="bg-white/5 rounded-2xl border border-white/5 p-4 space-y-3 backdrop-blur-sm">
                   <div className="flex items-start gap-3">
                     {/* 아바타 */}
-                    <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-lg shrink-0 ${isAdmin ? 'bg-blue-900' : 'bg-slate-700'}`}>
+                    <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-lg shrink-0 ${isAdmin ? 'bg-gradient-to-br from-blue-500 to-blue-600' : 'bg-white/10'}`}>
                       {isAdmin ? '👑' : '👤'}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-white text-sm font-bold truncate">{user.email || '이메일 없음'}</p>
-                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${isAdmin ? 'bg-blue-900 text-blue-300' : 'bg-slate-700 text-slate-400'}`}>
+                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${isAdmin ? 'bg-blue-500/20 text-blue-300 border-blue-500/30' : 'bg-white/10 text-slate-400 border-white/10'}`}>
                           {isAdmin ? 'ADMIN' : 'USER'}
                         </span>
                       </div>
                       <div className="flex gap-3 mt-1">
                         <p className="text-xs text-slate-500">가입 {joinDate}</p>
-                        <p className="text-xs text-slate-500">분석 {userLogs}회</p>
+                        <p className="text-xs text-slate-500">분석 <span className="text-slate-300 font-semibold">{userLogs}회</span></p>
                       </div>
                       <p className="text-[10px] text-slate-600 mt-0.5 font-mono truncate">{user.uid}</p>
                     </div>
@@ -1839,7 +1966,7 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
                   <div className="flex gap-2">
                     <button
                       onClick={() => onUpdateUserRole(user.uid, isAdmin ? 'user' : 'admin')}
-                      className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors ${isAdmin ? 'bg-red-900/60 text-red-300 hover:bg-red-900' : 'bg-blue-900/60 text-blue-300 hover:bg-blue-900'}`}>
+                      className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all active:scale-95 ${isAdmin ? 'bg-red-500/15 text-red-300 border border-red-500/20 hover:bg-red-500/25' : 'bg-blue-500/15 text-blue-300 border border-blue-500/20 hover:bg-blue-500/25'}`}>
                       {isAdmin
                         ? <><UserX size={12} /> 관리자 해제</>
                         : <><UserCheck size={12} /> 관리자로 승격</>
@@ -1853,7 +1980,6 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
         )}
 
       </div>
-      <DisclaimerBar />
     </div>
   )
 }
@@ -2037,9 +2163,14 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combi
     <div className="px-5 pt-6 pb-5 bg-gradient-to-b from-[#0192F5] to-[#40BEFD]">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <img src="/logo.png" alt="이거돼?" onClick={onLogoTap}
-            className="w-10 h-10 rounded-2xl object-cover cursor-pointer active:scale-90 transition-transform"
-            onError={e => { e.target.style.display='none' }} />
+          <button onClick={() => { setStep(1); onLogoTap() }} className="active:scale-90 transition-transform shrink-0" style={{ background:'none', border:'none', padding:0 }}>
+            <img src="/logo.png" alt="이거돼?"
+              className="object-cover shadow-md"
+              style={{ width: 40, height: 40, borderRadius: 12 }}
+              onError={e => { e.currentTarget.style.display='none'; e.currentTarget.nextSibling.style.display='flex' }} />
+            <div className="items-center justify-center text-2xl"
+              style={{ display:'none', width:40, height:40, borderRadius:12, background:'rgba(255,255,255,0.25)' }}>💊</div>
+          </button>
           <div>
             <h1 className="text-white font-black text-lg leading-tight">이거 돼?</h1>
             <p className="text-white/70 text-xs">AI 약물 판독 서비스</p>
@@ -2478,7 +2609,15 @@ export default function App() {
     await runAnalysis(base64, file.type || 'image/jpeg', file)
   }, [processImage, runAnalysis])
 
+
+
+
+
+
+
+
   const handleLogoTap = () => {
+    if (view !== 'home') setView('home')
     const next = logoTapCount + 1
     setLogoTapCount(next)
     if (logoTapTimer.current) clearTimeout(logoTapTimer.current)
@@ -2544,8 +2683,15 @@ export default function App() {
   if (view === 'history') return (
     <HistoryView
       logs={analysisLogs} isGuest={isGuest}
-      onSelect={(log) => { setAnalysisResult({ ...log }); setMfdsInfo(null); setPreviewUrl(null); setView('home') }}
+      onSelect={(log) => {
+        setAnalysisResult({ ...log })
+        setPillResults([{ ...log }])
+        setMfdsInfo(null)
+        setPreviewUrl(null)
+        setView('home')
+      }}
       onBack={() => setView('home')}
+      onLoginRequest={() => { setIsGuest(false) }}
     />
   )
 
