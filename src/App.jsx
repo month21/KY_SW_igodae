@@ -2148,10 +2148,9 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combi
   const [step, setStep] = useState(previewUrl || analysisResult ? 2 : 1)
   const [showCorrection, setShowCorrection] = useState(false)
   const selectedPill = pillResults[selectedPillIdx] || pillResults[0]
-
-  useEffect(() => {
-    if ((previewUrl || analyzing || mfdsLoading) && step === 1) setStep(2)
-  }, [previewUrl, analyzing, mfdsLoading, step])
+useEffect(() => {
+  if ((previewUrl || analyzing || mfdsLoading) && step === 1) setStep(2)
+}, [previewUrl, analyzing, mfdsLoading, step])
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0]
