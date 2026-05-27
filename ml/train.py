@@ -46,14 +46,16 @@ MFDS_DRUG_URL = 'https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEa
 
 EMB_DIM    = 512
 BATCH_SIZE = 64
-EPOCHS     = 40
+EPOCHS     = 20
 LR         = 3e-4
-PATIENCE   = 10
+PATIENCE   = 5
 AUG_PER_IMAGE = 30   # 원본 1장 → 30장 증강
+WARM_START = True     # 이전 backbone 로드 (ArcFace head만 리셋)
+MAX_TRAIN_PILLS = 5000  # 5차: 식약처 25,551종 중 학습 대상 수
 
 # OOD (Out-of-Distribution) 방어 설정
 NEGATIVE_PER_TYPE  = 500   # 네거티브 카테고리당 생성 수
-OOD_THRESHOLD      = 0.30  # 코사인 유사도 이 미만이면 "약 아님" 판정 (2차 학습용)
+OOD_THRESHOLD      = 0.40  # 코사인 유사도 이 미만이면 "약 아님" 판정 (4차: 0.25→0.40, OOD 방어 강화)
 NEGATIVE_LABEL_NAME = '__NOT_A_PILL__'
 NEG_IMAGE_DIR = DATA_DIR / 'negatives'
 
@@ -260,9 +262,9 @@ def collect_data():
 # ════════════════════════════════════════════════════════════
 
 WEB_IMAGE_DIR = DATA_DIR / 'web_images'
-WEB_IMAGES_PER_PILL = 8    # 약 하나당 최대 8장 (식약처 이미지 없는 약은 이게 유일한 소스)
+WEB_IMAGES_PER_PILL = 10   # 5차: 식약처 공식 이미지가 메인, 웹은 다양성 보강용
 WEB_CSV_PATH = DATA_DIR / 'web_pills.csv'
-MAX_WEB_CRAWL_PILLS = 2000  # 2차 학습: 상위 2000종까지 크롤링
+MAX_WEB_CRAWL_PILLS = 5000
 
 def collect_all_pill_names():
     """식약처 API에서 전체 약 이름 수집 (이미지 유무 무관)
@@ -381,9 +383,9 @@ def search_google_images(query, num=5):
 
 
 def download_web_image(url, save_path):
-    """웹 이미지 다운로드 (유효성 검증 포함)"""
+    """웹 이미지 다운로드 (유효성 검증 + 품질필터 포함)"""
     if save_path.exists():
-        return True
+        return is_valid_pill_image(str(save_path))
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -391,19 +393,78 @@ def download_web_image(url, save_path):
         }
         resp = requests.get(url, headers=headers, timeout=10, stream=True)
         resp.raise_for_status()
-        # 크기 제한 (10MB 이상 스킵)
         if int(resp.headers.get('content-length', 0)) > 10 * 1024 * 1024:
             return False
         img = Image.open(BytesIO(resp.content)).convert('RGB')
-        # 너무 작거나 큰 이미지 제외
-        if img.width < 50 or img.height < 50:
+        if img.width < 80 or img.height < 80:
             return False
         if img.width > 4000 or img.height > 4000:
             img.thumbnail((1024, 1024))
         img.save(str(save_path), 'JPEG', quality=85)
+        return is_valid_pill_image(str(save_path))
+    except:
+        return False
+
+
+def is_valid_pill_image(img_path):
+    """웹 크롤링 이미지 품질 필터 — 약 사진이 아닌 쓰레기 제거"""
+    try:
+        img = Image.open(img_path).convert('RGB')
+        w, h = img.size
+        arr = np.array(img)
+
+        if w < 80 or h < 80:
+            return False
+
+        ratio = max(w, h) / min(w, h)
+        if ratio > 3.0:
+            return False
+
+        white_ratio = ((arr > 240).all(axis=2)).mean()
+        if white_ratio > 0.80:
+            return False
+
+        black_ratio = ((arr < 15).all(axis=2)).mean()
+        if black_ratio > 0.80:
+            return False
+
+        if arr.std() < 12:
+            return False
+
+        gray = np.array(img.convert('L'), dtype=np.int16)
+        h_diff = np.abs(gray[:, 1:] - gray[:, :-1])
+        v_diff = np.abs(gray[1:, :] - gray[:-1, :])
+        edge_ratio = ((h_diff > 30).mean() + (v_diff > 30).mean()) / 2
+        if edge_ratio > 0.25:
+            return False
+
         return True
     except:
         return False
+
+
+def filter_web_images(df):
+    """DataFrame에서 품질 나쁜 웹 이미지 제거"""
+    if len(df) == 0:
+        return df
+
+    print('\n🔍 이미지 품질 필터 적용 중...')
+    valid_mask = []
+    removed = 0
+    for _, row in tqdm(df.iterrows(), total=len(df), desc='  품질 검사'):
+        path = row.get('image_path', '')
+        source = row.get('source', '')
+        if source == 'web':
+            ok = is_valid_pill_image(path)
+            valid_mask.append(ok)
+            if not ok:
+                removed += 1
+        else:
+            valid_mask.append(True)
+
+    filtered = df[valid_mask].reset_index(drop=True)
+    print(f'  🗑️ 제거: {removed:,}장 | 남은 웹 이미지: {len(filtered):,}장')
+    return filtered
 
 
 def collect_web_images(pill_names):
@@ -418,39 +479,79 @@ def collect_web_images(pill_names):
     print(f'  대상: {len(pill_names):,}종 × 최대 {WEB_IMAGES_PER_PILL}장')
     print(f'  (네이버 + 구글 이미지 검색)')
 
+    MIN_GOOD_IMAGES = 6  # 약당 최소 이 만큼은 좋은 이미지 확보
     web_rows = []
     failed = 0
     pbar = tqdm(pill_names, desc='  웹 이미지 수집')
 
     for pill_name in pbar:
-        # 약 이름으로 검색 (짧은 이름은 '정' '캡슐' 등 붙여서)
         query = pill_name
         if len(pill_name) < 4:
             query = f'{pill_name} 알약'
 
-        # 네이버 먼저, 부족하면 구글 보충
-        urls = search_naver_images(query, WEB_IMAGES_PER_PILL)
-        if len(urls) < WEB_IMAGES_PER_PILL:
-            urls += search_google_images(query, WEB_IMAGES_PER_PILL - len(urls))
-
-        if not urls:
-            failed += 1
-            continue
-
         pill_dir = WEB_IMAGE_DIR / safe_dirname(pill_name)
         pill_dir.mkdir(exist_ok=True)
 
-        for i, url in enumerate(urls[:WEB_IMAGES_PER_PILL]):
-            save_path = pill_dir / f'web_{i}.jpg'
-            if download_web_image(url, save_path):
+        # 기존 이미지 중 품질 통과한 것 확인
+        existing_good = []
+        for f in sorted(pill_dir.glob('web_*.jpg')):
+            if is_valid_pill_image(str(f)):
+                existing_good.append(str(f))
+
+        # 이미 충분하면 스킵
+        if len(existing_good) >= MIN_GOOD_IMAGES:
+            for i, path in enumerate(existing_good[:WEB_IMAGES_PER_PILL]):
                 web_rows.append({
                     'item_code': f'WEB_{safe_dirname(pill_name)}_{i}',
+                    'item_name': pill_name,
+                    'image_path': path,
+                    'source': 'web',
+                })
+            continue
+
+        # 부족하면 새로 검색 — 넉넉하게 요청해서 필터 후 채우기
+        need = WEB_IMAGES_PER_PILL - len(existing_good)
+        fetch_count = need * 3  # 필터 탈락 감안해서 3배 요청
+
+        urls = search_naver_images(query, fetch_count)
+        if len(urls) < fetch_count:
+            urls += search_google_images(query, fetch_count - len(urls))
+        # 검색어 변형 추가 시도
+        if len(urls) < need:
+            urls += search_naver_images(f'{pill_name} 약 사진', need)
+            urls += search_google_images(f'{pill_name} pill tablet', need)
+
+        if not urls and not existing_good:
+            failed += 1
+            continue
+
+        # 기존 좋은 이미지 먼저 등록
+        img_idx = 0
+        for path in existing_good:
+            web_rows.append({
+                'item_code': f'WEB_{safe_dirname(pill_name)}_{img_idx}',
+                'item_name': pill_name,
+                'image_path': path,
+                'source': 'web',
+            })
+            img_idx += 1
+
+        # 새 이미지 다운로드 + 필터
+        good_count = len(existing_good)
+        for url in urls:
+            if good_count >= WEB_IMAGES_PER_PILL:
+                break
+            save_path = pill_dir / f'web_{img_idx}.jpg'
+            if download_web_image(url, save_path):
+                web_rows.append({
+                    'item_code': f'WEB_{safe_dirname(pill_name)}_{img_idx}',
                     'item_name': pill_name,
                     'image_path': str(save_path),
                     'source': 'web',
                 })
+                good_count += 1
+            img_idx += 1
 
-        # 레이트 리밋 (차단 방지 — 2000종 크롤링이므로 안전하게)
         time.sleep(1.0)
         pbar.set_postfix(수집=len(web_rows), 실패=failed)
 
@@ -755,7 +856,63 @@ def collect_negative_data():
         total_generated += NEGATIVE_PER_TYPE
 
     print(f'  ✅ 네거티브 이미지 총 {total_generated:,}장 준비 완료')
+
+    # 실제 비약 웹 이미지 크롤링 (합성만으로는 OOD 방어 부족)
+    web_neg_count = collect_web_negatives()
+    total_generated += web_neg_count
     return total_generated
+
+
+WEB_NEG_QUERIES = [
+    '동전 클로즈업', '버튼 사진', '사탕 알사탕',
+    '젤리빈', '초콜릿 원형', '비타민 보충제',
+    '지우개 작은', '배터리 건전지', '나사 볼트',
+    '구슬 유리구슬', '반지 액세서리', '열쇠 자물쇠',
+]
+WEB_NEG_PER_QUERY = 30
+
+def collect_web_negatives():
+    """실제 비약 이미지를 웹에서 크롤링 — 합성 네거티브 보완"""
+    web_neg_dir = NEG_IMAGE_DIR / 'web_real'
+    web_neg_dir.mkdir(parents=True, exist_ok=True)
+
+    existing = list(web_neg_dir.glob('*.jpg'))
+    target = len(WEB_NEG_QUERIES) * WEB_NEG_PER_QUERY
+    if len(existing) >= target:
+        print(f'  ✅ 웹 네거티브: 이미 {len(existing)}장 존재')
+        return len(existing)
+
+    print(f'  🌐 실제 비약 웹 이미지 크롤링 ({len(WEB_NEG_QUERIES)}개 쿼리)...')
+    total = len(existing)
+    for query in tqdm(WEB_NEG_QUERIES, desc='    웹 네거티브'):
+        urls = search_naver_images(query, num=WEB_NEG_PER_QUERY * 2)
+        urls += search_google_images(query, num=WEB_NEG_PER_QUERY)
+        downloaded = 0
+        for url in urls:
+            if downloaded >= WEB_NEG_PER_QUERY:
+                break
+            save_path = web_neg_dir / f'web_neg_{total:04d}.jpg'
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                                   'AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                }
+                resp = requests.get(url, headers=headers, timeout=8, stream=True)
+                resp.raise_for_status()
+                img = Image.open(BytesIO(resp.content)).convert('RGB')
+                if img.width < 80 or img.height < 80:
+                    continue
+                if img.width > 4000 or img.height > 4000:
+                    img.thumbnail((1024, 1024))
+                img.save(str(save_path), 'JPEG', quality=85)
+                total += 1
+                downloaded += 1
+            except:
+                continue
+        time.sleep(1)
+
+    print(f'  ✅ 웹 네거티브 크롤링 완료: {total}장')
+    return total
 
 
 # ════════════════════════════════════════════════════════════
@@ -1155,6 +1312,105 @@ def evaluate_recall(model, val_loader, ref_loader, top_k=5):
 
 
 # ════════════════════════════════════════════════════════════
+#  Active Learning — Firestore 정정 데이터 수집
+# ════════════════════════════════════════════════════════════
+
+CORRECTION_DIR = DATA_DIR / 'corrections'
+
+def collect_corrections():
+    """Firestore corrections 컬렉션에서 정정 데이터를 가져와 학습 이미지로 변환"""
+    CORRECTION_DIR.mkdir(parents=True, exist_ok=True)
+
+    corrections_json = CORRECTION_DIR / 'corrections.json'
+    if corrections_json.exists():
+        with open(corrections_json, 'r', encoding='utf-8') as f:
+            cached = json.load(f)
+        print(f'  ✅ 정정 데이터 캐시 로드: {len(cached)}건')
+        rows = []
+        for c in cached:
+            img_path = CORRECTION_DIR / f'{c["id"]}.jpg'
+            if img_path.exists():
+                rows.append({
+                    'item_code': f'CORR_{c["id"]}',
+                    'item_name': c['correctDrugName'],
+                    'image_path': str(img_path),
+                })
+        if rows:
+            print(f'  📊 정정 이미지 사용 가능: {len(rows)}장')
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    # Firestore에서 가져오기 (firebase-admin 필요)
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore as fs
+    except ImportError:
+        print('  ⚠️ firebase-admin 미설치 — 정정 데이터 건너뜀')
+        print('    설치: pip install firebase-admin')
+        return pd.DataFrame()
+
+    try:
+        if not firebase_admin._apps:
+            # 서비스 계정 키 파일 or 기본 인증
+            sa_path = BASE_DIR / 'serviceAccountKey.json'
+            if sa_path.exists():
+                cred = credentials.Certificate(str(sa_path))
+                firebase_admin.initialize_app(cred)
+            else:
+                firebase_admin.initialize_app()
+
+        db = fs.client()
+        app_id = 'igeordwae-dev'
+        docs = db.collection(f'artifacts/{app_id}/public/data/corrections').stream()
+
+        corrections = []
+        for doc in docs:
+            d = doc.to_dict()
+            if not d.get('correctDrugName') or not d.get('imageBase64'):
+                continue
+
+            img_b64 = d['imageBase64']
+            if ',' in img_b64:
+                img_b64 = img_b64.split(',', 1)[1]
+
+            img_path = CORRECTION_DIR / f'{doc.id}.jpg'
+            if not img_path.exists():
+                try:
+                    import base64 as b64
+                    img_bytes = b64.b64decode(img_b64)
+                    img = Image.open(BytesIO(img_bytes)).convert('RGB')
+                    img.save(str(img_path), 'JPEG', quality=90)
+                except:
+                    continue
+
+            corrections.append({
+                'id': doc.id,
+                'correctDrugName': d['correctDrugName'],
+                'originalResult': d.get('originalResult', ''),
+            })
+
+        with open(corrections_json, 'w', encoding='utf-8') as f:
+            json.dump(corrections, f, ensure_ascii=False, indent=2)
+        print(f'  ✅ Firestore 정정 데이터: {len(corrections)}건 다운로드')
+
+        rows = []
+        for c in corrections:
+            img_path = CORRECTION_DIR / f'{c["id"]}.jpg'
+            if img_path.exists():
+                rows.append({
+                    'item_code': f'CORR_{c["id"]}',
+                    'item_name': c['correctDrugName'],
+                    'image_path': str(img_path),
+                })
+
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    except Exception as e:
+        print(f'  ⚠️ Firestore 연결 실패: {e}')
+        print('    serviceAccountKey.json 파일이 ml/ 폴더에 필요합니다')
+        return pd.DataFrame()
+
+
+# ════════════════════════════════════════════════════════════
 #  메인 실행
 # ════════════════════════════════════════════════════════════
 
@@ -1167,36 +1423,49 @@ def main():
     # ── 데이터 수집 (식약처 API 2개) ──
     df = collect_data()
 
-    # ── 전체 약 이름 수집 (2차 학습: 이미지 없는 약도 포함) ──
-    existing_pill_names = set(df['item_name'].unique())
-    all_pill_names_full = collect_all_pill_names()
+    # ── 식약처 이미지 품질 필터 ──
+    before = len(df)
+    df = df[df['image_path'].apply(lambda p: os.path.exists(p) and is_valid_pill_image(p))].reset_index(drop=True)
+    print(f'  📋 식약처 이미지 필터: {before}장 → {len(df)}장 ({before - len(df)}장 제거)')
 
-    # 기존 273종 + 추가 약 이름 (총 MAX_WEB_CRAWL_PILLS까지)
-    # 기존 학습된 약 우선, 나머지는 가나다순으로 추가
-    extra_names = [n for n in all_pill_names_full if n not in existing_pill_names]
-    remaining_slots = max(0, MAX_WEB_CRAWL_PILLS - len(existing_pill_names))
-    selected_extra = extra_names[:remaining_slots]
+    # ── 5차: 식약처 이미지가 충분하면 그 중에서 MAX_TRAIN_PILLS 선별 ──
+    all_mfds_names = sorted(df['item_name'].unique())
+    if len(all_mfds_names) > MAX_TRAIN_PILLS:
+        selected_names = set(all_mfds_names[:MAX_TRAIN_PILLS])
+        df = df[df['item_name'].isin(selected_names)].reset_index(drop=True)
+        print(f'  📋 학습 대상 선별: {len(all_mfds_names):,}종 → {MAX_TRAIN_PILLS:,}종')
+    else:
+        selected_names = set(all_mfds_names)
 
-    crawl_targets = sorted(existing_pill_names) + selected_extra
-    print(f'\n🌐 Phase 1-2b: 웹 이미지 수집')
-    print(f'  기존 (식약처 이미지 有): {len(existing_pill_names):,}종')
-    print(f'  추가 (웹 크롤링만):      {len(selected_extra):,}종')
-    print(f'  총 크롤링 대상:          {len(crawl_targets):,}종')
+    # ── 웹 이미지로 다양성 확보 (식약처 이미지가 있는 약만 추가 크롤링) ──
+    crawl_targets = sorted(selected_names)
+    print(f'\n🌐 Phase 1-2b: 웹 이미지 수집 (다양성 보강)')
+    print(f'  식약처 공식 이미지: {len(selected_names):,}종')
+    print(f'  웹 크롤링 대상:     {len(crawl_targets):,}종 (추가 각도/조명 확보)')
     web_df = collect_web_images(crawl_targets)
 
     if len(web_df) > 0:
-        # 웹 이미지를 기존 df와 합침 (같은 item_name → 같은 클래스)
+        web_df = filter_web_images(web_df)
+
         web_df_clean = web_df[['item_code', 'item_name', 'image_path']].copy()
-        # 식약처 df에 없는 컬럼은 빈값
         for col in ['shape', 'color_front', 'color_back', 'print_front', 'print_back']:
             if col not in web_df_clean.columns:
                 web_df_clean[col] = ''
         df = pd.concat([df, web_df_clean], ignore_index=True)
         total_classes = df['item_name'].nunique()
-        print(f'  📊 식약처 + 웹 합산: {len(df):,}장 ({total_classes:,}종)')
+        print(f'  📊 식약처 + 웹 합산 (필터 후): {len(df):,}장 ({total_classes:,}종)')
         imgs_per_class = df.groupby('item_name').size()
         multi = (imgs_per_class > 1).sum()
         print(f'  2장 이상 보유 클래스: {multi:,}종 / {total_classes:,}종')
+
+    # ── Active Learning: 정정 데이터 반영 (데이터 쌓이면 활성화) ──
+    # corr_df = collect_corrections()
+    # if len(corr_df) > 0:
+    #     for col in ['shape', 'color_front', 'color_back', 'print_front', 'print_back']:
+    #         if col not in corr_df.columns:
+    #             corr_df[col] = ''
+    #     df = pd.concat([df, corr_df], ignore_index=True)
+    #     print(f'  📊 정정 데이터 병합 후: {len(df):,}장 ({df["item_name"].nunique():,}종)')
 
     # ── 네거티브 이미지 생성 ──
     print('\n🎨 Phase 1-3: 네거티브 이미지 생성 (약이 아닌 것)')
@@ -1270,6 +1539,27 @@ def main():
     params = sum(p.numel() for p in model.parameters())
     print(f'\n🧠 모델: EfficientNet-B0 + ArcFace')
     print(f'  임베딩: {EMB_DIM}차원 | 파라미터: {params/1e6:.1f}M')
+
+    # ── Warm Start (이전 학습 backbone 로드) ──
+    prev_ckpt = OUTPUT_DIR / 'best_model.pth'
+    if WARM_START and prev_ckpt.exists():
+        prev = torch.load(str(prev_ckpt), map_location=DEVICE)
+        prev_state = prev['model_state_dict']
+        # 이전 모델 백업
+        import shutil
+        backup_name = f'best_model_v{prev.get("num_classes", "?")}.pth'
+        backup_path = OUTPUT_DIR / backup_name
+        if not backup_path.exists():
+            shutil.copy2(str(prev_ckpt), str(backup_path))
+            print(f'  💾 이전 모델 백업: {backup_name}')
+        # backbone + embedding 가중치만 로드 (ArcFace head는 클래스 수 달라서 리셋)
+        backbone_keys = {k: v for k, v in prev_state.items()
+                         if k.startswith('backbone.') or k.startswith('embedding.')}
+        model.load_state_dict(backbone_keys, strict=False)
+        print(f'  🔥 Warm Start: 이전 모델에서 backbone+embedding 로드 ({len(backbone_keys)}개 파라미터)')
+        print(f'     이전 클래스: {prev["num_classes"]}종 → 현재: {NUM_CLASSES}종')
+    elif WARM_START:
+        print(f'  ⚠️ Warm Start 요청했지만 이전 모델 없음 — 처음부터 학습')
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=0.01)

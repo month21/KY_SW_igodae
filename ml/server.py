@@ -20,6 +20,7 @@ from torchvision import transforms
 from io import BytesIO
 import base64
 from pathlib import Path
+from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator
 
 app = Flask(__name__)
 CORS(app)
@@ -48,6 +49,7 @@ ref_names = None
 ood_config = None
 transform = None
 DEVICE = None
+sam_generator = None
 
 def load_model():
     global model, ref_embeddings, ref_names, ood_config, transform, DEVICE
@@ -103,6 +105,28 @@ def load_model():
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
+    # MobileSAM 로드 (있으면)
+    global sam_generator
+    sam_path = OUTPUT_DIR / 'mobile_sam.pt'
+    if sam_path.exists():
+        try:
+            sam = sam_model_registry['vit_t'](checkpoint=str(sam_path))
+            sam.to(DEVICE if DEVICE.type != 'mps' else torch.device('cpu'))
+            sam.eval()
+            sam_generator = SamAutomaticMaskGenerator(
+                sam,
+                points_per_side=16,
+                pred_iou_thresh=0.86,
+                stability_score_thresh=0.92,
+                min_mask_region_area=1000,
+            )
+            print('✅ MobileSAM 로드 완료 (멀티약 분리 가능)')
+        except Exception as e:
+            print(f'⚠️ MobileSAM 로드 실패: {e}')
+            sam_generator = None
+    else:
+        print('ℹ️ MobileSAM 가중치 없음 — 단일 약 모드만 사용')
+
 
 @app.route('/api/model-inference', methods=['POST', 'OPTIONS'])
 def inference():
@@ -114,65 +138,134 @@ def inference():
         if not data or 'image' not in data:
             return jsonify({'error': 'image (base64) 필드 필요'}), 400
 
-        # base64 → PIL Image
         img_b64 = data['image']
-        # data:image/jpeg;base64, 접두사 제거
         if ',' in img_b64:
             img_b64 = img_b64.split(',', 1)[1]
 
         img_bytes = base64.b64decode(img_b64)
         img = Image.open(BytesIO(img_bytes)).convert('RGB')
 
-        # 추론
-        img_tensor = transform(img).unsqueeze(0).to(DEVICE)
-        with torch.no_grad():
-            query = model.get_embedding(img_tensor).cpu().numpy()
-
-        # 코사인 유사도
-        sims = np.dot(ref_embeddings, query.T).flatten()
-
-        # 네거티브 레이블 제외하고 약만 매칭
-        neg_label = ood_config.get('negative_label', '__NOT_A_PILL__')
-        pill_mask = np.array([n != neg_label for n in ref_names])
-
-        sims_pill = sims.copy()
-        sims_pill[~pill_mask] = -1  # 네거티브 제외
-
-        top1_sim = float(sims_pill.max())
-        top5_idxs = np.argsort(sims_pill)[::-1][:5]
-
+        result = analyze_single_crop(img)
         threshold = ood_config.get('threshold', 0.45)
 
-        # OOD 판정
-        if top1_sim < threshold:
+        if result is None:
             return jsonify({
                 'success': True,
                 'isPill': False,
-                'confidence': top1_sim,
+                'confidence': 0.0,
                 'threshold': threshold,
                 'message': '약으로 인식할 수 없습니다',
                 'pills': [],
             })
 
-        # 상위 5개 결과
-        results = []
-        for idx in top5_idxs:
-            name = ref_names[idx]
-            if name == neg_label:
-                continue
-            results.append({
-                'drugName': name,
-                'similarity': float(sims[idx]),
-            })
-            if len(results) >= 5:
-                break
-
         return jsonify({
             'success': True,
             'isPill': True,
-            'confidence': top1_sim,
+            'confidence': result['confidence'],
             'threshold': threshold,
-            'pills': results,
+            'pills': result['pills'],
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def analyze_single_crop(img):
+    """단일 이미지 → ArcFace 매칭 (내부 헬퍼)"""
+    img_tensor = transform(img).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        query = model.get_embedding(img_tensor).cpu().numpy()
+
+    sims = np.dot(ref_embeddings, query.T).flatten()
+    neg_label = ood_config.get('negative_label', '__NOT_A_PILL__')
+    pill_mask = np.array([n != neg_label for n in ref_names])
+    sims_pill = sims.copy()
+    sims_pill[~pill_mask] = -1
+
+    top1_sim = float(sims_pill.max())
+    top5_idxs = np.argsort(sims_pill)[::-1][:5]
+    threshold = ood_config.get('threshold', 0.45)
+
+    if top1_sim < threshold:
+        return None
+
+    results = []
+    for idx in top5_idxs:
+        name = ref_names[idx]
+        if name == neg_label:
+            continue
+        results.append({
+            'drugName': name,
+            'similarity': float(sims[idx]),
+        })
+        if len(results) >= 5:
+            break
+
+    return {
+        'confidence': top1_sim,
+        'pills': results,
+    }
+
+
+@app.route('/api/model-inference/multi', methods=['POST', 'OPTIONS'])
+def inference_multi():
+    """여러 약 동시 인식 — SAM으로 분리 후 각각 ArcFace 매칭"""
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    if sam_generator is None:
+        return jsonify({'error': 'MobileSAM이 로드되지 않았습니다'}), 503
+
+    try:
+        data = request.get_json()
+        if not data or 'image' not in data:
+            return jsonify({'error': 'image (base64) 필드 필요'}), 400
+
+        img_b64 = data['image']
+        if ',' in img_b64:
+            img_b64 = img_b64.split(',', 1)[1]
+
+        img_bytes = base64.b64decode(img_b64)
+        img = Image.open(BytesIO(img_bytes)).convert('RGB')
+        img_np = np.array(img)
+
+        masks = sam_generator.generate(img_np)
+
+        # 면적순 정렬 (큰 마스크 = 약일 확률 높음), 너무 큰 마스크(전체 이미지) 제외
+        total_area = img_np.shape[0] * img_np.shape[1]
+        masks = [m for m in masks if m['area'] < total_area * 0.8 and m['area'] > total_area * 0.005]
+        masks = sorted(masks, key=lambda x: x['area'], reverse=True)[:10]
+
+        pill_results = []
+        for i, mask_data in enumerate(masks):
+            bbox = mask_data['bbox']  # [x, y, w, h]
+            x, y, w, h = [int(v) for v in bbox]
+
+            pad = int(max(w, h) * 0.1)
+            x1 = max(0, x - pad)
+            y1 = max(0, y - pad)
+            x2 = min(img_np.shape[1], x + w + pad)
+            y2 = min(img_np.shape[0], y + h + pad)
+
+            crop = img.crop((x1, y1, x2, y2))
+
+            result = analyze_single_crop(crop)
+            if result is None:
+                continue
+
+            pill_results.append({
+                'index': i,
+                'bbox': [x1, y1, x2, y2],
+                'confidence': result['confidence'],
+                'pills': result['pills'],
+            })
+
+        return jsonify({
+            'success': True,
+            'mode': 'multi',
+            'segmentsFound': len(masks),
+            'pillsIdentified': len(pill_results),
+            'results': pill_results,
         })
 
     except Exception as e:
@@ -186,6 +279,7 @@ def health():
         'model_loaded': model is not None,
         'ref_count': len(ref_names) if ref_names else 0,
         'ood_threshold': ood_config.get('threshold', 0.45) if ood_config else None,
+        'sam_loaded': sam_generator is not None,
     })
 
 

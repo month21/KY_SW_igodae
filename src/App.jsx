@@ -105,6 +105,26 @@ async function fetchModelInference(base64WithPrefix) {
   }
 }
 
+// ─── DL 모델 멀티약 추론 (SAM 분리 → 각각 ArcFace) ─────────────────────────
+async function fetchMultiPillInference(base64WithPrefix) {
+  try {
+    console.log('🔬 멀티약 SAM 분석 시작...')
+    const res = await fetch(`${MODEL_PROXY}/multi`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: base64WithPrefix }),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    console.log('🔬 멀티약 결과:', JSON.stringify(data).slice(0, 300))
+    if (data.error || !data.success) return null
+    return data
+  } catch (e) {
+    console.log('🔬 멀티약 분석 실패:', e.message)
+    return null
+  }
+}
+
 // ─── 식약처 텍스트 AI 요약 ───────────────────────────────────────────────────
 async function summarizeMfdsText(label, text) {
   if (!text || text.length < 50) return text
@@ -127,41 +147,64 @@ async function summarizeMfdsText(label, text) {
 // ─── 식약처 API: 의약품 개요정보 조회 ────────────────────────────────────────
 async function fetchMfdsInfo(drugName) {
   if (!drugName) return null
-  try {
-    const params = new URLSearchParams({ itemName: drugName, numOfRows: '3', pageNo: '1' })
+  const parseMfdsItem = (item) => ({
+    itemName: item.itemName,
+    entpName: item.entpName,
+    efcyQesitm: item.efcyQesitm,
+    useMethodQesitm: item.useMethodQesitm,
+    atpnWarnQesitm: item.atpnWarnQesitm,
+    atpnQesitm: item.atpnQesitm,
+    intrcQesitm: item.intrcQesitm,
+    seQesitm: item.seQesitm,
+    depositMethodQesitm: item.depositMethodQesitm,
+    source: '식품의약품안전처',
+  })
+  const trySearch = async (name) => {
+    const params = new URLSearchParams({ itemName: name, numOfRows: '3', pageNo: '1' })
     const res = await fetch(`${MFDS_DRUG_INFO_URL}&${params}`)
     const data = await res.json()
     const items = data?.body?.items
     if (!items || items.length === 0) return null
-    const item = items[0]
-    return {
-      itemName: item.itemName,
-      entpName: item.entpName,
-      efcyQesitm: item.efcyQesitm,
-      useMethodQesitm: item.useMethodQesitm,
-      atpnWarnQesitm: item.atpnWarnQesitm,
-      atpnQesitm: item.atpnQesitm,
-      intrcQesitm: item.intrcQesitm,
-      seQesitm: item.seQesitm,
-      depositMethodQesitm: item.depositMethodQesitm,
-      source: '식품의약품안전처',
+    return parseMfdsItem(items[0])
+  }
+  try {
+    for (const variant of shortenDrugName(drugName)) {
+      const result = await trySearch(variant)
+      if (result) return result
     }
+    return null
   } catch (e) {
     console.warn('식약처 API 오류:', e.message)
     return null
   }
 }
 
+function shortenDrugName(name) {
+  const short = name.replace(/\(.*\)$/, '').trim()
+  const base = name.replace(/(정|캡슐|밀리그램|mg|시럽|현탁액|산|과립|주)[\d]*.*$/i, '').trim()
+  const variants = [name]
+  if (short !== name) variants.push(short)
+  if (base.length >= 2 && base !== name && base !== short) variants.push(base)
+  return variants
+}
+
 // ─── 식약처 API: 낱알식별 - 이름으로 검색 ───────────────────────────────────
 async function fetchPillByName(drugName) {
   if (!drugName) return null
-  try {
-    const params = new URLSearchParams({ itemName: drugName, numOfRows: '5', pageNo: '1' })
+  const trySearch = async (name) => {
+    const params = new URLSearchParams({ itemName: name, numOfRows: '5', pageNo: '1' })
     const res = await fetch(`${MFDS_PILL_INFO_URL}&${params}`)
     const data = await res.json()
     const items = data?.body?.items
     if (!items || items.length === 0) return null
     return items[0]
+  }
+  try {
+    for (const variant of shortenDrugName(drugName)) {
+      const result = await trySearch(variant)
+      if (result) return result
+    }
+    return null
   } catch (e) {
     console.warn('낱알식별(이름) API 오류:', e.message)
     return null
@@ -190,28 +233,35 @@ async function fetchPillByFeature({ color, shape, imprint, form }) {
 // ─── 식약처 API: 의약품 제품허가정보 상세 ────────────────────────────────────
 async function fetchDrugPermission(drugName) {
   if (!drugName) return null
-  try {
-    const params = new URLSearchParams({ item_name: drugName, numOfRows: '3', pageNo: '1' })
+  const parsePermitItem = (it) => ({
+    itemName:       it.ITEM_NAME        || it.itemName        || null,
+    entpName:       it.ENTP_NAME        || it.entpName        || null,
+    itemPermitDate: it.ITEM_PERMIT_DATE || it.itemPermitDate  || null,
+    ingrName:       it.INGR_NAME        || it.ingrName        || null,
+    etcOtcName:     it.ETC_OTC_NAME     || it.etcOtcName      || null,
+    storageMethod:  it.STORAGE_METHOD   || it.storageMethod   || null,
+    validTerm:      it.VALID_TERM       || it.validTerm       || null,
+    packUnit:       it.PACK_UNIT        || it.packUnit        || null,
+    cancelName:     it.CANCEL_NAME      || it.cancelName      || null,
+    source: '식약처_제품허가',
+  })
+  const trySearch = async (name) => {
+    const params = new URLSearchParams({ item_name: name, numOfRows: '3', pageNo: '1' })
     const res = await fetch(`${MFDS_PRMISN_URL}&${params}`)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) return null
     const data = await res.json()
     const raw = data?.body?.items
     if (!raw) return null
     const items = Array.isArray(raw) ? raw : Array.isArray(raw.item) ? raw.item : [raw.item]
     if (!items || items.length === 0) return null
-    const it = items[0]
-    return {
-      itemName:       it.ITEM_NAME        || it.itemName        || null,
-      entpName:       it.ENTP_NAME        || it.entpName        || null,
-      itemPermitDate: it.ITEM_PERMIT_DATE || it.itemPermitDate  || null,
-      ingrName:       it.INGR_NAME        || it.ingrName        || null,
-      etcOtcName:     it.ETC_OTC_NAME     || it.etcOtcName      || null,
-      storageMethod:  it.STORAGE_METHOD   || it.storageMethod   || null,
-      validTerm:      it.VALID_TERM       || it.validTerm       || null,
-      packUnit:       it.PACK_UNIT        || it.packUnit        || null,
-      cancelName:     it.CANCEL_NAME      || it.cancelName      || null,
-      source: '식약처_제품허가',
+    return parsePermitItem(items[0])
+  }
+  try {
+    for (const variant of shortenDrugName(drugName)) {
+      const result = await trySearch(variant)
+      if (result) return result
     }
+    return null
   } catch (e) {
     console.warn('제품허가 API 오류:', e.message)
     return null
@@ -437,10 +487,11 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
     }
 
     // 4단계: 약품명으로 개요 + 제품허가 병렬 조회
-    if (pillData?.itemName && !drugInfo) {
+    const resolvedName = pillData?.itemName || pillData?.ITEM_NAME
+    if (resolvedName && !drugInfo) {
       ;[drugInfo, permitInfo] = await Promise.all([
-        fetchMfdsInfo(pillData.itemName),
-        fetchDrugPermission(pillData.itemName),
+        fetchMfdsInfo(resolvedName),
+        fetchDrugPermission(resolvedName),
       ])
     }
   }
@@ -452,26 +503,45 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
     if (efcySummary.length > 100) efcySummary = await summarizeMfdsText('효능', efcySummary)
     if (atpnSummary.length > 100) atpnSummary = await summarizeMfdsText('주의사항', atpnSummary)
     if (useSummary.length  > 80)  useSummary  = await summarizeMfdsText('복용법', useSummary)
-    const etcOtc = permitInfo?.etcOtcName || (drugInfo ? '처방약' : '-')
+
+    // drugInfo 없으면 pillInfo CLASS_NAME + Groq 요약으로 폴백
+    const pillName = pillData.itemName || pillData.ITEM_NAME
+    if (!efcySummary && pillData.CLASS_NAME) {
+      efcySummary = `[${pillData.CLASS_NAME}] 분류 의약품입니다.`
+    }
+    if (!efcySummary && pillName) {
+      try {
+        const data = await safeFetchGroq({
+          model: GROQ_MODEL,
+          messages: [{ role: 'user', content: `"${pillName}" 약의 효능과 용도를 1~2문장으로 간단히 알려주세요. 모르면 "정보 없음"이라고만 답해주세요.` }],
+          temperature: 0.3, max_tokens: 100,
+        })
+        const answer = data.choices?.[0]?.message?.content?.trim()
+        if (answer && !answer.includes('정보 없음')) efcySummary = answer
+      } catch { /* Groq 실패 시 무시 */ }
+    }
+    if (!atpnSummary) atpnSummary = '복용 전 약사에게 확인하세요.'
+
+    const etcOtc = permitInfo?.etcOtcName || pillData.ETC_OTC_NAME || (drugInfo ? '처방약' : '-')
     return {
       statusCode: 'caution',
       statusText: '복용 전 확인하세요',
-      summary: pillData.itemName || pillFeature.drugName || `${pillFeature.color} ${pillFeature.shape} 알약`,
-      drugNameForSearch: pillData.itemName,
+      summary: pillName || pillFeature.drugName || `${pillFeature.color} ${pillFeature.shape} 알약`,
+      drugNameForSearch: pillName,
       description: efcySummary || '',
       visualDescription: `${pillFeature.color}색 ${pillFeature.shape} 알약이에요.`,
       warnings: atpnSummary || '복용 전 약사에게 확인하세요.',
       dosageGuide: useSummary || '-',
       interactions: drugInfo?.intrcQesitm ? [drugInfo.intrcQesitm.slice(0, 60)] : [],
-      activeIngredients: permitInfo?.ingrName ? [permitInfo.ingrName] : pillData.itemName ? [pillData.itemName] : [],
+      activeIngredients: permitInfo?.ingrName ? [permitInfo.ingrName] : pillName ? [pillName] : [],
       drugType:      etcOtc,
       confidence:    calculateMatchConfidence({ pillFeature, matchSource, drugInfo, permitInfo }),
       matchSource,
       pillColor:     pillFeature.color,
       pillShape:     pillFeature.shape,
       pillImprint:   pillFeature.imprint,
-      itemImage:     pillData?.itemImage    || null,
-      entpName:      permitInfo?.entpName   || pillData?.entpName || null,
+      itemImage:     pillData?.itemImage    || pillData?.ITEM_IMAGE || null,
+      entpName:      permitInfo?.entpName   || pillData?.entpName || pillData?.ENTP_NAME || null,
       permitDate:    permitInfo?.itemPermitDate || null,
       storageMethod: permitInfo?.storageMethod  || null,
       validTerm:     permitInfo?.validTerm      || null,
@@ -756,16 +826,29 @@ function DurWarningCard({ warnings }) {
 }
 
 // ─── 정정하기 모달 (팀원 테스트용 — Active Learning 데이터 수집) ──────────────
-function CorrectionModal({ isOpen, onClose, currentImage, currentResult, onSubmit }) {
+function CorrectionModal({ isOpen, onClose, currentImage, currentResult, allPillResults, initialIdx = -1, onSubmit }) {
+  const [editingIdx, setEditingIdx] = useState(initialIdx)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState([])
   const [searching, setSearching] = useState(false)
   const [selectedName, setSelectedName] = useState('')
   const [customName, setCustomName] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [submitted, setSubmitted] = useState(false)
+  const [submittedSet, setSubmittedSet] = useState(new Set())
 
   if (!isOpen) return null
+
+  const pills = allPillResults?.length > 0 ? allPillResults : currentResult ? [currentResult] : []
+  const isMulti = pills.length > 1
+  const editingPill = editingIdx >= 0 ? pills[editingIdx] : null
+  const allDone = pills.length > 0 && submittedSet.size === pills.length
+
+  const resetForm = () => {
+    setSearchQuery('')
+    setSearchResults([])
+    setSelectedName('')
+    setCustomName('')
+  }
 
   const searchMfds = async () => {
     if (!searchQuery.trim()) return
@@ -787,20 +870,26 @@ function CorrectionModal({ isOpen, onClose, currentImage, currentResult, onSubmi
   const handleSubmit = async () => {
     const correctName = selectedName || customName.trim()
     if (!correctName) return
+    const pill = editingPill || currentResult
     setSubmitting(true)
     try {
       await onSubmit({
         correctDrugName: correctName,
-        originalResult: currentResult?.summary || '미인식',
-        originalConfidence: currentResult?.confidence || 0,
+        originalResult: pill?.summary || '미인식',
+        originalConfidence: pill?.confidence || 0,
         image: currentImage,
+        pillIndex: editingIdx >= 0 ? editingIdx : 0,
       })
-      setSubmitted(true)
+      setSubmittedSet(prev => new Set([...prev, editingIdx >= 0 ? editingIdx : 0]))
+      if (isMulti) {
+        setEditingIdx(-1)
+        resetForm()
+      }
     } catch (e) { console.warn('정정 저장 실패:', e.message) }
     setSubmitting(false)
   }
 
-  if (submitted) {
+  if (!isMulti && submittedSet.size > 0) {
     return (
       <div className="fixed inset-0 z-[9999] bg-black/50 flex items-end justify-center" onClick={onClose}>
         <div className="w-full max-w-[480px] bg-white rounded-t-3xl p-6 space-y-4 animate-slide-up" onClick={e => e.stopPropagation()}>
@@ -815,6 +904,44 @@ function CorrectionModal({ isOpen, onClose, currentImage, currentResult, onSubmi
     )
   }
 
+  if (isMulti && editingIdx < 0) {
+    return (
+      <div className="fixed inset-0 z-[9999] bg-black/50 flex items-end justify-center" onClick={onClose}>
+        <div className="w-full max-w-[480px] bg-white rounded-t-3xl p-5 space-y-4 animate-slide-up max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+          <div className="text-center">
+            <p className="font-bold text-lg text-slate-800">🔧 약 이름 정정하기</p>
+            <p className="text-xs text-slate-400 mt-1">정정할 약을 선택하세요</p>
+          </div>
+          <div className="space-y-2">
+            {pills.map((pill, i) => (
+              <button
+                key={i}
+                onClick={() => { resetForm(); setEditingIdx(i) }}
+                className={`w-full text-left px-4 py-3 rounded-xl border text-sm transition-all flex items-center justify-between ${
+                  submittedSet.has(i) ? 'border-green-200 bg-green-50' : 'border-slate-200 bg-white active:bg-slate-50'
+                }`}
+              >
+                <div>
+                  <p className="font-bold text-slate-800">{pill.summary || `알약 ${i + 1}`}</p>
+                  <p className="text-xs text-slate-400">{pill.confidence ? `${pill.confidence}%` : ''} {pill.entpName || ''}</p>
+                </div>
+                {submittedSet.has(i)
+                  ? <span className="text-green-500 text-sm font-bold">정정됨 ✓</span>
+                  : <span className="text-amber-500 text-sm">정정하기 →</span>
+                }
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2 pt-2">
+            <button onClick={onClose} className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-500 font-bold text-sm">
+              {allDone ? '완료' : '닫기'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="fixed inset-0 z-[9999] bg-black/50 flex items-end justify-center" onClick={onClose}>
       <div className="w-full max-w-[480px] bg-white rounded-t-3xl p-5 space-y-4 animate-slide-up max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
@@ -823,10 +950,10 @@ function CorrectionModal({ isOpen, onClose, currentImage, currentResult, onSubmi
           <p className="text-xs text-slate-400 mt-1">AI가 잘못 인식했다면 올바른 약 이름을 알려주세요</p>
         </div>
 
-        {currentResult?.summary && (
+        {(editingPill || currentResult)?.summary && (
           <div className="bg-red-50 rounded-xl p-3 border border-red-100">
-            <p className="text-xs text-red-400 font-semibold">AI 분석 결과</p>
-            <p className="text-sm font-bold text-red-700">{currentResult.summary}</p>
+            <p className="text-xs text-red-400 font-semibold">AI 분석 결과{isMulti ? ` (${editingIdx + 1}번째 약)` : ''}</p>
+            <p className="text-sm font-bold text-red-700">{(editingPill || currentResult).summary}</p>
           </div>
         )}
 
@@ -874,7 +1001,12 @@ function CorrectionModal({ isOpen, onClose, currentImage, currentResult, onSubmi
         </div>
 
         <div className="flex gap-2 pt-2">
-          <button onClick={onClose} className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-500 font-bold text-sm">취소</button>
+          {isMulti && (
+            <button onClick={() => { setEditingIdx(-1); resetForm() }} className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-500 font-bold text-sm">← 목록</button>
+          )}
+          {!isMulti && (
+            <button onClick={onClose} className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-500 font-bold text-sm">취소</button>
+          )}
           <button
             onClick={handleSubmit}
             disabled={submitting || (!selectedName && !customName.trim())}
@@ -889,7 +1021,7 @@ function CorrectionModal({ isOpen, onClose, currentImage, currentResult, onSubmi
 }
 
 // ─── 알약 리스트 카드 ─────────────────────────────────────────────────────────
-function PillListCard({ pillResults, onSelectPill, selectedIdx }) {
+function PillListCard({ pillResults, onSelectPill, selectedIdx, onCorrectPill }) {
   if (!pillResults || pillResults.length === 0) return null
   return (
     <div className="space-y-3 animate-slide-up">
@@ -990,6 +1122,14 @@ function PillListCard({ pillResults, onSelectPill, selectedIdx }) {
                       </div>
                     )}
                     {needsCommunity && <CommunityButton />}
+                    {import.meta.env.DEV && onCorrectPill && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onCorrectPill(i, pill) }}
+                        className="mt-2 w-full py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 text-xs font-bold active:scale-95 transition-all"
+                      >
+                        ✏️ 이 약 정정하기
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -1730,6 +1870,7 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combi
   const fileInputRef = useRef(null)
   const [step, setStep] = useState(previewUrl || analysisResult ? 2 : 1)
   const [showCorrection, setShowCorrection] = useState(false)
+  const [correctionTarget, setCorrectionTarget] = useState(null)
   const selectedPill = pillResults[selectedPillIdx] || pillResults[0]
 
   useEffect(() => {
@@ -1830,6 +1971,7 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combi
             pillResults={pillResults}
             selectedIdx={selectedPillIdx}
             onSelectPill={setSelectedPillIdx}
+            onCorrectPill={(idx, pill) => { setCorrectionTarget({ idx, pill }); setShowCorrection(true) }}
           />
         )}
         {!analyzing && !mfdsLoading && pillResults.length === 0 && analysisResult && analysisResult.statusCode === 'unidentified' && (
@@ -1898,9 +2040,11 @@ function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combi
       )}
       <CorrectionModal
         isOpen={showCorrection}
-        onClose={() => setShowCorrection(false)}
+        onClose={() => { setShowCorrection(false); setCorrectionTarget(null) }}
         currentImage={capturedImageBase64}
-        currentResult={selectedPill}
+        currentResult={correctionTarget?.pill || selectedPill}
+        allPillResults={correctionTarget ? null : pillResults}
+        initialIdx={correctionTarget?.idx ?? -1}
         onSubmit={onCorrection}
       />
     </div>
@@ -2005,57 +2149,83 @@ export default function App() {
     let aiResult
     const imageDataUrl = `data:${mimeType};base64,${base64}`
 
-    // ── 1단계: DL 모델 시도 (결정적, 같은 사진 = 같은 결과) ──
-    const dlResult = await fetchModelInference(imageDataUrl)
+    // ── 1단계: SAM 멀티약 시도 → 단일 DL → Groq 순서 ──
+    const multiResult = await fetchMultiPillInference(imageDataUrl)
 
-    if (dlResult && !dlResult.isPill) {
-      // OOD 방어: 약이 아닌 이미지
-      setAnalysisResult({
-        statusCode: 'unidentified',
-        summary: '약이 아닙니다',
-        description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
-        confidence: 0,
-      })
-      setAnalyzing(false)
-      return
-    }
-
-    if (dlResult?.isPill && dlResult.pills?.length > 0) {
-      // DL 모델이 약으로 인식 → confidence 구간별 처리
-      const conf = dlResult.confidence
-      const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
-      console.log(`🧠 DL 모델 매칭 (유사도: ${(conf * 100).toFixed(1)}%, 확신도: ${confLabel})`)
-      const topPill = dlResult.pills[0]
-      aiResult = {
-        pills: [{
-          drugName: topPill.drugName,
+    if (multiResult && multiResult.pillsIdentified >= 2) {
+      // SAM이 여러 약을 감지 → 각각 분석
+      console.log(`🔬 SAM: ${multiResult.pillsIdentified}개 약 감지`)
+      const multiPills = multiResult.results.map(r => {
+        const top = r.pills[0]
+        const conf = r.confidence
+        const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
+        return {
+          drugName: top.drugName,
           color: '', shape: '', form: '', imprint: '', size: '',
-          confidence: topPill.similarity,
-          description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
+          confidence: top.similarity,
+          description: `SAM+DL 매칭 (유사도 ${(top.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
           fromDL: true,
-        }],
-        totalCount: 1,
+          bbox: r.bbox,
+        }
+      })
+      aiResult = {
+        pills: multiPills,
+        totalCount: multiPills.length,
         symptomHint: '',
-        dlConfidenceLevel: confLabel,
+        dlConfidenceLevel: multiPills[0].confidence >= 0.75 ? '높음' : '보통',
+        multiMode: true,
       }
     } else {
-      // ── DL 모델 미연결 또는 실패 → 기존 Groq 단독 ──
-      try {
-        const data = await safeFetchGroq({
-          model: GROQ_VISION_MODEL,
-          messages: [{ role: 'user', content: [
-            { type: 'text', text: buildVisionPrompt(userConditions, symptom) },
-            { type: 'image_url', image_url: { url: imageDataUrl } }
-          ]}],
-          temperature: 0.1,
-          max_tokens: 1000,
+      // 단일약 모드: 기존 DL → Groq 폴백
+      const dlResult = await fetchModelInference(imageDataUrl)
+
+      if (dlResult && !dlResult.isPill) {
+        setAnalysisResult({
+          statusCode: 'unidentified',
+          summary: '약이 아닙니다',
+          description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
+          confidence: 0,
         })
-        const raw = data.choices?.[0]?.message?.content || '{}'
-        aiResult = JSON.parse(raw.replace(/```json|```/g, '').trim())
-      } catch (e) {
-        setAnalysisResult({ statusCode: 'unidentified', summary: '분석 실패', description: e.message, confidence: 0 })
         setAnalyzing(false)
         return
+      }
+
+      if (dlResult?.isPill && dlResult.pills?.length > 0) {
+        const conf = dlResult.confidence
+        const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
+        console.log(`🧠 DL 모델 매칭 (유사도: ${(conf * 100).toFixed(1)}%, 확신도: ${confLabel})`)
+        const topPill = dlResult.pills[0]
+        aiResult = {
+          pills: [{
+            drugName: topPill.drugName,
+            color: '', shape: '', form: '', imprint: '', size: '',
+            confidence: topPill.similarity,
+            description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
+            fromDL: true,
+          }],
+          totalCount: 1,
+          symptomHint: '',
+          dlConfidenceLevel: confLabel,
+        }
+      } else {
+        // ── DL 모델 미연결 또는 실패 → 기존 Groq 단독 ──
+        try {
+          const data = await safeFetchGroq({
+            model: GROQ_VISION_MODEL,
+            messages: [{ role: 'user', content: [
+              { type: 'text', text: buildVisionPrompt(userConditions, symptom) },
+              { type: 'image_url', image_url: { url: imageDataUrl } }
+            ]}],
+            temperature: 0.1,
+            max_tokens: 1000,
+          })
+          const raw = data.choices?.[0]?.message?.content || '{}'
+          aiResult = JSON.parse(raw.replace(/```json|```/g, '').trim())
+        } catch (e) {
+          setAnalysisResult({ statusCode: 'unidentified', summary: '분석 실패', description: e.message, confidence: 0 })
+          setAnalyzing(false)
+          return
+        }
       }
     }
 
