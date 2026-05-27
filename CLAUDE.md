@@ -84,3 +84,4 @@ The admin dashboard (`AdminView`) is reached by tapping the logo 7 times on the 
 - Models are pinned via constants at the top of `App.jsx` (`GROQ_MODEL`, `GROQ_VISION_MODEL`). Change them there, not inline.
 - `safeFetchGroq` already handles 429/5xx with exponential backoff — reuse it instead of writing new retry logic.
 - All external API calls go through `/api/*` proxies. Never call `api.groq.com` or `apis.data.go.kr` directly from client code.
+- **커밋 시 `Co-Authored-By` 줄을 절대 넣지 않는다.** Claude 이름을 커밋에 남기지 말 것.

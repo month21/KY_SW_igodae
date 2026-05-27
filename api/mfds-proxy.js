@@ -18,7 +18,7 @@ export default async function handler(req, res) {
   const ALLOWED_ENDPOINTS = {
     drugInfo:   'https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList',
     pillInfo:   'https://apis.data.go.kr/1471000/MdcinGrnIdntfcInfoService03/getMdcinGrnIdntfcInfoList03',
-    permission: 'https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnDtlInq05',
+    permission: 'https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnDtlInq06',
   }
 
   const targetBase = ALLOWED_ENDPOINTS[endpoint]
