@@ -1945,39 +1945,54 @@ function HistoryView({ logs, onSelect, onBack, isGuest, onLoginRequest }) {
 }
 
 
-// ─── 관리자 뷰 (유저 관리 + corrections + 통계) ──────────────────────────────
+// ─── 관리자 뷰 (통계 / 기록 / 유저 / 정정 — 4탭) ────────────────────────────
 function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
-  const [adminTab, setAdminTab] = useState('stats')  // 'stats' | 'users' | 'corrections'
+  const [adminTab, setAdminTab] = useState('stats')
+  const [accuracyFilter, setAccuracyFilter] = useState(null) // null | 'high' | 'low'
 
-  // ── 통계 계산 ────────────────────────────────────────────────────────────────
-  const total     = logs.length
-  const trusted   = logs.filter(l => (l.confidence || 0) >= 0.8).length
-  const avgConf   = total > 0
-    ? Math.round(logs.reduce((sum, l) => sum + (l.confidence || 0), 0) / total * 100)
-    : 0
-  const safeCount   = logs.filter(l => (l.confidence||0) >= 0.8 && l.statusCode !== 'danger').length
-  const cautionCount= logs.filter(l => (l.confidence||0) <  0.8 && l.statusCode !== 'danger').length
-  const dangerCount = logs.filter(l => l.statusCode === 'danger').length
-  const today       = new Date()
-  const todayCount  = logs.filter(l => {
+  // ── 통계 계산 ──────────────────────────────────────────────────────────────
+  const total        = logs.length
+  const today        = new Date()
+  const todayCount   = logs.filter(l => {
     const d = l.createdAt?.toDate?.()
     return d && d.toDateString() === today.toDateString()
   }).length
 
-  // ── 유저별 분석 횟수 계산 ─────────────────────────────────────────────────
+  // AI 정확도 80% 기준
+  const highAccCount = logs.filter(l => getConfidencePct(l.confidence) >= 80).length
+  const lowAccCount  = total - highAccCount
+  const highAccPct   = total > 0 ? Math.round((highAccCount / total) * 100) : 0
+  const lowAccPct    = total > 0 ? Math.round((lowAccCount  / total) * 100) : 0
+
+  // 유저별 분석 횟수
   const logCountByUser = logs.reduce((acc, l) => {
     if (l.userId) acc[l.userId] = (acc[l.userId] || 0) + 1
     return acc
   }, {})
 
   const TABS = [
-    { key: 'stats', label: '통계',              icon: '📊' },
-    { key: 'users', label: `유저(${allUsers.length})`, icon: '👥' },
+    { key: 'stats',       label: '통계',                       icon: '📊' },
+    { key: 'logs',        label: `기록(${logs.length})`,        icon: '📋' },
+    { key: 'users',       label: `유저(${allUsers.length})`,    icon: '👥' },
+    { key: 'corrections', label: `정정(${corrections.length})`, icon: '🔧' },
   ]
+
+  // 정확도 클릭 → 기록 탭 이동 + 필터 적용
+  const handleAccuracyClick = (type) => {
+    setAccuracyFilter(type)
+    setAdminTab('logs')
+  }
+
+  // 기록 탭 표시 로그 (필터 적용)
+  const filteredLogs = accuracyFilter === 'high'
+    ? logs.filter(l => getConfidencePct(l.confidence) >= 80)
+    : accuracyFilter === 'low'
+    ? logs.filter(l => getConfidencePct(l.confidence) < 80)
+    : logs
 
   return (
     <div className="flex flex-col h-[100dvh] bg-[#0f172a]">
-      {/* 헤더 */}
+      {/* ── 헤더 ── */}
       <div className="px-5 pt-6 pb-0 bg-gradient-to-b from-[#1e293b] to-[#0f172a] border-b border-white/5 sticky top-0 z-10">
         <div className="flex items-center gap-3 pb-3">
           <button onClick={onBack} className="w-9 h-9 rounded-2xl bg-white/10 flex items-center justify-center">
@@ -1993,12 +2008,14 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
           <span className="bg-blue-500/20 text-blue-300 text-xs px-2.5 py-1 rounded-full font-bold border border-blue-500/30">Admin</span>
           <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
         </div>
-        {/* 탭 */}
-        <div className="flex gap-1 pb-0">
+        {/* 4탭 */}
+        <div className="grid grid-cols-4 gap-0.5">
           {TABS.map(t => (
-            <button key={t.key} onClick={() => setAdminTab(t.key)}
-              className={`flex-1 py-2.5 text-xs font-bold rounded-t-xl transition-all ${adminTab === t.key ? 'bg-[#0f172a] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
-              {t.icon} {t.label}
+            <button key={t.key}
+              onClick={() => { setAdminTab(t.key); if (t.key !== 'logs') setAccuracyFilter(null) }}
+              className={`py-2 text-[11px] font-bold rounded-t-xl transition-all leading-tight ${adminTab === t.key ? 'bg-[#0f172a] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+              <span className="block">{t.icon}</span>
+              <span className="block">{t.label}</span>
             </button>
           ))}
         </div>
@@ -2006,16 +2023,16 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
 
       <div className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
 
-        {/* ── 통계 탭 ── */}
+        {/* ══ 통계 탭 ══ */}
         {adminTab === 'stats' && (
           <>
-            {/* 요약 카드 2열 */}
+            {/* 요약 카드 2열 — 총/오늘/유저/정정 */}
             <div className="grid grid-cols-2 gap-3">
               {[
-                { label: '총 분석', value: `${total}회`, color: '#60a5fa', bg: 'rgba(96,165,250,0.1)', icon: '📊' },
-                { label: '오늘 분석', value: `${todayCount}건`, color: '#34d399', bg: 'rgba(52,211,153,0.1)', icon: '✨' },
-                { label: '신뢰 분석', value: `${trusted}건`, color: '#a78bfa', bg: 'rgba(167,139,250,0.1)', icon: '🎯' },
-                { label: '정정 요청', value: `${corrections.length}건`, color: '#fb923c', bg: 'rgba(251,146,60,0.1)', icon: '✏️' },
+                { label: '총 분석',   value: `${total}회`,             color: '#60a5fa', bg: 'rgba(96,165,250,0.1)',   icon: '📊' },
+                { label: '오늘 분석', value: `${todayCount}건`,         color: '#34d399', bg: 'rgba(52,211,153,0.1)',  icon: '✨' },
+                { label: '가입 유저', value: `${allUsers.length}명`,    color: '#a78bfa', bg: 'rgba(167,139,250,0.1)', icon: '👥' },
+                { label: '정정 요청', value: `${corrections.length}건`, color: '#fb923c', bg: 'rgba(251,146,60,0.1)',  icon: '✏️' },
               ].map(({ label, value, color, bg, icon }) => (
                 <div key={label} className="rounded-2xl border border-white/5 p-4 flex flex-col gap-2" style={{ background: bg }}>
                   <div className="flex items-center justify-between">
@@ -2026,49 +2043,118 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
                 </div>
               ))}
             </div>
-            {/* 정확도 바 */}
-            <div className="bg-white/5 rounded-2xl p-5 border border-white/5 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider">AI 인식 정확도</p>
-                <span className="text-xs px-2 py-0.5 rounded-full font-bold" style={{ background: avgConf >= 80 ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)', color: avgConf >= 80 ? '#10b981' : '#f59e0b' }}>
-                  {avgConf >= 80 ? '우수' : '보통'}
-                </span>
-              </div>
-              <p className="text-4xl font-black" style={{ color: avgConf >= 80 ? '#10b981' : '#f59e0b' }}>{avgConf}<span className="text-xl ml-0.5">%</span></p>
-              <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                <div className="h-full rounded-full transition-all duration-700" style={{ width: `${avgConf}%`, background: avgConf >= 80 ? 'linear-gradient(90deg,#10b981,#34d399)' : 'linear-gradient(90deg,#f59e0b,#fbbf24)' }} />
-              </div>
-              <div className="flex justify-between pt-1">
-                <div className="text-center"><p className="text-emerald-400 font-bold text-lg">{trusted}</p><p className="text-slate-500 text-xs">신뢰 (80%↑)</p></div>
-                <div className="text-center"><p className="text-amber-400 font-bold text-lg">{total - trusted}</p><p className="text-slate-500 text-xs">미신뢰</p></div>
-              </div>
-            </div>
-            {/* 사회 기여도 */}
+
+            {/* AI 정확도 분포 */}
             <div className="bg-white/5 rounded-2xl p-5 border border-white/5 space-y-4">
-              <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider">사회 기여도</p>
-              {[
-                { color: '#10b981', label: '안전 약품 안내', count: safeCount, bar: 'rgba(16,185,129,0.2)' },
-                { color: '#f59e0b', label: '주의 필요 경고', count: cautionCount, bar: 'rgba(245,158,11,0.2)' },
-                { color: '#ef4444', label: '위험 약품 차단', count: dangerCount, bar: 'rgba(239,68,68,0.2)' },
-              ].map(({ color, label, count, bar }) => (
-                <div key={label} className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
-                      <p className="text-slate-300 text-sm">{label}</p>
-                    </div>
-                    <p className="font-bold text-sm" style={{ color }}>{count}건</p>
+              <div className="flex items-center justify-between">
+                <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider">AI 정확도 분포</p>
+                <p className="text-slate-600 text-[11px]">클릭하면 해당 기록으로 이동</p>
+              </div>
+
+              {/* 80% 이상 */}
+              <button onClick={() => handleAccuracyClick('high')}
+                className="w-full space-y-1.5 text-left active:scale-[0.98] transition-transform">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                    <p className="text-slate-300 text-sm">80% 이상 (신뢰)</p>
                   </div>
-                  <div className="h-1.5 rounded-full" style={{ background: bar }}>
-                    <div className="h-full rounded-full transition-all duration-700" style={{ width: total > 0 ? `${(count/total)*100}%` : '0%', background: color }} />
+                  <div className="flex items-center gap-2">
+                    <p className="font-bold text-sm text-emerald-400">{highAccCount}건</p>
+                    <span className="text-xs text-emerald-300 bg-emerald-500/20 px-2 py-0.5 rounded-full font-bold border border-emerald-500/30">
+                      {highAccPct}%
+                    </span>
+                    <ChevronRight size={14} className="text-slate-500" />
                   </div>
                 </div>
-              ))}
+                <div className="h-2 rounded-full overflow-hidden bg-emerald-500/10">
+                  <div className="h-full rounded-full bg-emerald-400 transition-all duration-700"
+                    style={{ width: `${highAccPct}%` }} />
+                </div>
+              </button>
+
+              {/* 80% 미만 */}
+              <button onClick={() => handleAccuracyClick('low')}
+                className="w-full space-y-1.5 text-left active:scale-[0.98] transition-transform">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2.5 h-2.5 rounded-full bg-amber-400" />
+                    <p className="text-slate-300 text-sm">80% 미만 (주의)</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <p className="font-bold text-sm text-amber-400">{lowAccCount}건</p>
+                    <span className="text-xs text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full font-bold border border-amber-500/30">
+                      {lowAccPct}%
+                    </span>
+                    <ChevronRight size={14} className="text-slate-500" />
+                  </div>
+                </div>
+                <div className="h-2 rounded-full overflow-hidden bg-amber-500/10">
+                  <div className="h-full rounded-full bg-amber-400 transition-all duration-700"
+                    style={{ width: `${lowAccPct}%` }} />
+                </div>
+              </button>
             </div>
           </>
         )}
 
-        {/* ── 유저 관리 탭 ── */}
+        {/* ══ 기록 탭 — 전체 계정 통합 최신 기록 ══ */}
+        {adminTab === 'logs' && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 px-1">
+              <p className="text-xs font-black text-slate-400 uppercase tracking-wider flex-1">
+                {accuracyFilter === 'high' ? '80% 이상 기록' : accuracyFilter === 'low' ? '80% 미만 기록' : '전체 분석 기록'} {filteredLogs.length}건
+              </p>
+              {accuracyFilter && (
+                <button onClick={() => setAccuracyFilter(null)}
+                  className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full border ${
+                    accuracyFilter === 'high'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  }`}>
+                  {accuracyFilter === 'high' ? '▲ 80% 이상' : '▼ 80% 미만'}
+                  <X size={10} />
+                </button>
+              )}
+            </div>
+            {filteredLogs.length === 0 && (
+              <p className="text-center text-slate-500 text-sm py-10">분석 기록이 없습니다.</p>
+            )}
+            {filteredLogs.map((log, i) => {
+              const pct     = getConfidencePct(log.confidence)
+              const trusted = pct >= 80
+              const dateStr = log.createdAt?.toDate?.()?.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) || '-'
+              const owner   = allUsers.find(u => u.uid === log.userId)
+              const email   = owner?.email || log.userId?.slice(0, 8) || '알 수 없음'
+              return (
+                <div key={log.id || i} className="bg-white/5 rounded-2xl border border-white/5 p-3 flex gap-3 items-center">
+                  {/* 썸네일 */}
+                  <div className="w-12 h-12 rounded-xl overflow-hidden bg-white/10 shrink-0 border border-white/10">
+                    {log.imageBase64
+                      ? <img
+                          src={log.imageBase64.startsWith('data:') ? log.imageBase64 : `data:image/jpeg;base64,${log.imageBase64}`}
+                          className="w-full h-full object-cover" alt="약품" loading="lazy"
+                        />
+                      : <div className="w-full h-full flex items-center justify-center text-xl">💊</div>
+                    }
+                  </div>
+                  <div className="flex-1 min-w-0 space-y-0.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${trusted ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-amber-500/20 text-amber-300 border-amber-500/30'}`}>
+                        {trusted ? '▲' : '▼'} {pct}%
+                      </span>
+                      <span className="text-[10px] text-slate-500">{dateStr}</span>
+                    </div>
+                    <p className="text-white text-sm font-bold truncate">{log.summary || '미분석 약품'}</p>
+                    <p className="text-slate-500 text-[11px] truncate">{email}</p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {/* ══ 유저 관리 탭 ══ */}
         {adminTab === 'users' && (
           <div className="space-y-3">
             <p className="text-xs font-black text-slate-400 uppercase tracking-wider px-1">
@@ -2078,13 +2164,12 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
               <p className="text-center text-slate-500 text-sm py-10">가입된 유저가 없습니다.</p>
             )}
             {allUsers.map((user) => {
-              const isAdmin    = user.role === 'admin'
-              const userLogs   = logCountByUser[user.uid] || 0
-              const joinDate   = user.createdAt?.toDate?.()?.toLocaleDateString('ko-KR', { year: '2-digit', month: 'short', day: 'numeric' }) || '-'
+              const isAdmin  = user.role === 'admin'
+              const userLogs = logCountByUser[user.uid] || 0
+              const joinDate = user.createdAt?.toDate?.()?.toLocaleDateString('ko-KR', { year: '2-digit', month: 'short', day: 'numeric' }) || '-'
               return (
                 <div key={user.uid} className="bg-white/5 rounded-2xl border border-white/5 p-4 space-y-3 backdrop-blur-sm">
                   <div className="flex items-start gap-3">
-                    {/* 아바타 */}
                     <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-lg shrink-0 ${isAdmin ? 'bg-gradient-to-br from-blue-500 to-blue-600' : 'bg-white/10'}`}>
                       {isAdmin ? '👑' : '👤'}
                     </div>
@@ -2102,7 +2187,6 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
                       <p className="text-[10px] text-slate-600 mt-0.5 font-mono truncate">{user.uid}</p>
                     </div>
                   </div>
-                  {/* 권한 토글 버튼 */}
                   <div className="flex gap-2">
                     <button
                       onClick={() => onUpdateUserRole(user.uid, isAdmin ? 'user' : 'admin')}
@@ -2116,6 +2200,48 @@ function AdminView({ logs, corrections, allUsers, onBack, onUpdateUserRole }) {
                 </div>
               )
             })}
+          </div>
+        )}
+
+        {/* ══ 정정 요청 탭 ══ */}
+        {adminTab === 'corrections' && (
+          <div className="space-y-3">
+            <p className="text-xs font-black text-slate-400 uppercase tracking-wider px-1">
+              AI 데이터 정정 요청 {corrections.length}건
+            </p>
+            {corrections.length === 0 && (
+              <p className="text-center text-slate-500 text-sm py-10">새로 들어온 정정 요청이 없습니다.</p>
+            )}
+            {corrections.map((corr, idx) => (
+              <div key={idx} className="bg-white/5 p-4 rounded-2xl border border-white/5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">
+                    {corr.createdAt?.toDate?.()?.toLocaleString('ko-KR') || '시간 없음'}
+                  </span>
+                  <span className="bg-red-500/20 text-red-300 text-[10px] font-black px-2 py-0.5 rounded-full border border-red-500/30">
+                    정정 피드백
+                  </span>
+                </div>
+                <div className="flex gap-3 items-center bg-white/5 p-2.5 rounded-xl">
+                  <div className="w-12 h-12 bg-white/10 rounded-lg overflow-hidden shrink-0">
+                    {corr.imageBase64
+                      ? <img
+                          src={corr.imageBase64.startsWith('data:') ? corr.imageBase64 : `data:image/jpeg;base64,${corr.imageBase64}`}
+                          className="w-full h-full object-cover" alt="pill"
+                        />
+                      : <div className="w-full h-full flex items-center justify-center text-xl">💊</div>
+                    }
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-slate-500 line-through truncate">AI: {corr.originalResult}</p>
+                    <p className="text-sm font-black text-white truncate">→ {corr.correctDrugName}</p>
+                    <p className="text-[10px] text-slate-600 mt-0.5">
+                      기존 정확도: {Math.round((corr.originalConfidence || 0) * 100)}%
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
@@ -2562,6 +2688,34 @@ export default function App() {
       setAuthReady(true)
     })
     return unsub
+  }, [])
+
+  // ── 관리자 계정 자동 생성 + 자동 로그인 (.env에 VITE_ADMIN_EMAIL 있을 때만) ──
+  // 딥러닝 담당자용 — 배포 전 .env에서 두 줄 삭제
+  useEffect(() => {
+    const adminEmail = import.meta.env.VITE_ADMIN_EMAIL
+    const adminPw    = import.meta.env.VITE_ADMIN_PASSWORD
+    if (!adminEmail || !adminPw || !auth || !db) return
+
+    const loginAdmin = () =>
+      signInWithEmailAndPassword(auth, adminEmail, adminPw)
+        .then(() => console.log('✅ 관리자 자동 로그인 완료:', adminEmail))
+        .catch(e => console.warn('관리자 로그인 실패:', e.message))
+
+    createUserWithEmailAndPassword(auth, adminEmail, adminPw)
+      .then(async (cred) => {
+        await setDoc(doc(db, 'users', cred.user.uid), {
+          email: adminEmail, role: 'admin',
+          createdAt: serverTimestamp(), lastLogin: serverTimestamp(),
+        })
+        console.log('✅ 관리자 계정 자동 생성 완료:', adminEmail)
+        // 계정 생성 후 자동 로그인
+        await loginAdmin()
+      })
+      .catch(() => {
+        // 이미 계정 존재 → 바로 로그인
+        loginAdmin()
+      })
   }, [])
 
   // ── 분석 기록 구독 (로그인 유저만 / 관리자는 전체, 일반은 본인 것) ───────────
