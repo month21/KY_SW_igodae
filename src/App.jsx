@@ -54,13 +54,12 @@ const MFDS_DRUG_INFO_URL = `${MFDS_PROXY}?endpoint=drugInfo`
 const MFDS_PILL_INFO_URL = `${MFDS_PROXY}?endpoint=pillInfo`
 const MFDS_PRMISN_URL   = `${MFDS_PROXY}?endpoint=permission`
 
-// ─── DUR API 엔드포인트 ───────────────────────────────────────────────────────
-const DUR_BASE = 'https://apis.data.go.kr/1471000/DURPrdlstInfoService03'
+// ─── DUR API 엔드포인트 (프록시 경유) ──────────────────────────────────────────
 const DUR_ENDPOINTS = {
-  병용금기:   `${DUR_BASE}/getUsjntTabooInfoList03`,
-  임부금기:   `${DUR_BASE}/getPwnmTabooInfoList03`,
-  노인주의:   `${DUR_BASE}/getOdsnAtentInfoList03`,
-  효능군중복: `${DUR_BASE}/getEfcyDplctInfoList03`,
+  병용금기:   `${MFDS_PROXY}?endpoint=durCombination`,
+  임부금기:   `${MFDS_PROXY}?endpoint=durPregnancy`,
+  노인주의:   `${MFDS_PROXY}?endpoint=durElderly`,
+  효능군중복: `${MFDS_PROXY}?endpoint=durDuplicate`,
 }
 
 // ─── Firebase 초기화 ──────────────────────────────────────────────────────────
@@ -461,20 +460,38 @@ async function fetchPillByFeature({ color, shape, imprint, form }) {
 }
 
 // ─── 식약처 API: 의약품 제품허가정보 상세 ────────────────────────────────────
+function parseDocXml(xml) {
+  if (!xml) return ''
+  const texts = []
+  const re = /<!\[CDATA\[([\s\S]*?)\]\]>/g
+  let m
+  while ((m = re.exec(xml)) !== null) {
+    const t = m[1].trim()
+    if (t) texts.push(t)
+  }
+  return texts.join(' ').replace(/\s+/g, ' ').trim()
+}
+
 async function fetchDrugPermission(drugName) {
   if (!drugName) return null
-  const parsePermitItem = (it) => ({
-    itemName:       it.ITEM_NAME        || it.itemName        || null,
-    entpName:       it.ENTP_NAME        || it.entpName        || null,
-    itemPermitDate: it.ITEM_PERMIT_DATE || it.itemPermitDate  || null,
-    ingrName:       it.INGR_NAME        || it.ingrName        || null,
-    etcOtcName:     it.ETC_OTC_NAME     || it.etcOtcName      || null,
-    storageMethod:  it.STORAGE_METHOD   || it.storageMethod   || null,
-    validTerm:      it.VALID_TERM       || it.validTerm       || null,
-    packUnit:       it.PACK_UNIT        || it.packUnit        || null,
-    cancelName:     it.CANCEL_NAME      || it.cancelName      || null,
-    source: '식약처_제품허가',
-  })
+  const parsePermitItem = (it) => {
+    const eeDoc = parseDocXml(it.EE_DOC_DATA || it.eeDocData || '')
+    const udDoc = parseDocXml(it.UD_DOC_DATA || it.udDocData || '')
+    const nbDoc = parseDocXml(it.NB_DOC_DATA || it.nbDocData || '')
+    return {
+      itemName:       it.ITEM_NAME        || it.itemName        || null,
+      entpName:       it.ENTP_NAME        || it.entpName        || null,
+      itemPermitDate: it.ITEM_PERMIT_DATE || it.itemPermitDate  || null,
+      ingrName:       it.INGR_NAME        || it.ingrName        || null,
+      etcOtcName:     it.ETC_OTC_NAME     || it.etcOtcName      || null,
+      storageMethod:  it.STORAGE_METHOD   || it.storageMethod   || null,
+      validTerm:      it.VALID_TERM       || it.validTerm       || null,
+      packUnit:       it.PACK_UNIT        || it.packUnit        || null,
+      cancelName:     it.CANCEL_NAME      || it.cancelName      || null,
+      eeDoc, udDoc, nbDoc,
+      source: '식약처_제품허가',
+    }
+  }
   const trySearch = async (name) => {
     const params = new URLSearchParams({ item_name: name, numOfRows: '3', pageNo: '1' })
     const res = await fetch(`${MFDS_PRMISN_URL}&${params}`)
@@ -491,6 +508,18 @@ async function fetchDrugPermission(drugName) {
       const result = await trySearch(variant)
       if (result) return result
     }
+    // 성분명으로 폴백 검색 (괄호 안 성분명 추출)
+    const ingrMatch = drugName.match(/\(([^)]+)\)/)
+    if (ingrMatch) {
+      const fullIngr = ingrMatch[1]
+      const result = await trySearch(fullIngr)
+      if (result) return result
+      const shortIngr = fullIngr.replace(/산.*$|염.*$/, '').trim()
+      if (shortIngr.length >= 3 && shortIngr !== fullIngr) {
+        const result2 = await trySearch(shortIngr)
+        if (result2) return result2
+      }
+    }
     return null
   } catch (e) {
     console.warn('제품허가 API 오류:', e.message)
@@ -500,16 +529,14 @@ async function fetchDrugPermission(drugName) {
 
 // ─── DUR API 헬퍼 ────────────────────────────────────────────────────────────
 async function fetchDurApi(endpoint, drugName) {
-  if (!MFDS_API_KEY || !drugName) return []
+  if (!drugName) return []
   try {
     const params = new URLSearchParams({
-      serviceKey: MFDS_API_KEY,
       itemName: drugName,
-      type: 'json',
       numOfRows: '5',
       pageNo: '1',
     })
-    const res = await fetch(`${endpoint}?${params}`)
+    const res = await fetch(`${endpoint}&${params}`)
     if (!res.ok) return []
     const data = await res.json()
     const raw = data?.body?.items
@@ -529,14 +556,21 @@ async function checkDurCombination(drugNames) {
       const drugA = drugNames[i], drugB = drugNames[j]
       const items = await fetchDurApi(DUR_ENDPOINTS.병용금기, drugA)
       const matched = items.filter(item => {
-        const prohibitName = item.PROHBT_CONTENT || item.prohibtContent || item.MIXTURE_ITEM_NAME || ''
-        return prohibitName.includes(drugB) || drugB.includes(prohibitName.slice(0, 4))
+        const mixItem = item.MIXTURE_ITEM_NAME || item.mixtureItemName || ''
+        const mixIngr = item.MIXTURE_INGR_KOR_NAME || item.mixtureIngrKorName || ''
+        const mixIngrEng = item.MIXTURE_INGR_ENG_NAME || item.mixtureIngrEngName || ''
+        return mixItem.includes(drugB) || drugB.includes(mixItem.slice(0, 4))
+          || mixIngr.includes(drugB) || drugB.includes(mixIngr.slice(0, 2))
+          || mixIngrEng.toLowerCase().includes(drugB.toLowerCase())
       })
       if (matched.length > 0) {
+        const m = matched[0]
+        const mixName = m.MIXTURE_INGR_KOR_NAME || m.mixtureIngrKorName || drugB
+        const reason = m.PROHBT_CONTENT || m.prohibtContent || ''
         warnings.push({
           type: '병용금기', level: 'danger', drugs: [drugA, drugB],
-          reason: matched[0].PROHBT_CONTENT || matched[0].prohibtContent || `${drugA}와 ${drugB}는 함께 복용하면 안 돼요.`,
-          note: matched[0].REMARK || matched[0].remark || '',
+          reason: reason ? `${drugA}와 ${mixName} 병용 시: ${reason.trim()}` : `${drugA}와 ${drugB}는 함께 복용하면 안 돼요.`,
+          note: m.REMARK || m.remark || '',
         })
       }
     }
@@ -605,20 +639,36 @@ async function checkDurDuplicate(drugNames) {
 }
 
 async function runDurCheck(pillResults, userProfile = {}) {
-  const drugNames = pillResults.map(p => p.drugNameForSearch || p.summary).filter(Boolean)
+  const rawNames = pillResults.map(p => p.drugNameForSearch || p.summary).filter(Boolean)
+  const drugNames = []
+  for (const name of rawNames) {
+    const norm = name.replace(/\s|\(.*\)/g, '').slice(0, 6)
+    if (!drugNames.some(d => d.replace(/\s|\(.*\)/g, '').slice(0, 6) === norm)) drugNames.push(name)
+  }
   if (drugNames.length === 0) return []
   const checks = []
-  // 2개 이상: 병용 금기 + 효능군 중복 체크
   if (drugNames.length >= 2) {
     checks.push(checkDurCombination(drugNames))
     checks.push(checkDurDuplicate(drugNames))
   }
-  // 개인 조건은 약 1개도 체크
-  if (userProfile.isPregnant) checks.push(checkDurPregnancy(drugNames))
-  if (userProfile.isElderly)  checks.push(checkDurElderly(drugNames))
-  if (checks.length === 0) return []
+  checks.push(checkDurPregnancy(drugNames))
+  checks.push(checkDurElderly(drugNames))
+
+  // 약 부작용을 DUR 카드에 포함
+  const pillWarnings = pillResults
+    .filter(p => p.sideEffects)
+    .map(p => ({
+      type: '부작용', level: 'info', drugs: [p.drugNameForSearch || p.summary],
+      reason: p.sideEffects,
+      note: '',
+    }))
+  const uniquePillWarnings = Object.values(pillWarnings.reduce((acc, w) => {
+    if (!acc[w.drugs[0]]) acc[w.drugs[0]] = w
+    return acc
+  }, {}))
+
   const results = await Promise.all(checks)
-  return results.flat()
+  return [...results.flat(), ...uniquePillWarnings]
 }
 
 // ─── 알약 종합 분석 (병용 안전성 포함) ─────────────────────────────────────────
@@ -677,11 +727,14 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
       if (pillData) {
         matchSource = 'dl_name'
         // pillData에서 이름 찾았으면 drugInfo/permission 재시도
-        if (pillData.itemName) {
-          ;[drugInfo, permitInfo] = await Promise.all([
-            fetchMfdsInfo(pillData.itemName),
-            fetchDrugPermission(pillData.itemName),
+        const pillItemName = pillData.itemName || pillData.ITEM_NAME
+        if (pillItemName) {
+          const [di, pi] = await Promise.all([
+            fetchMfdsInfo(pillItemName),
+            fetchDrugPermission(pillItemName),
           ])
+          if (di) drugInfo = di
+          if (pi) permitInfo = pi
         }
       }
     }
@@ -719,10 +772,12 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
     // 4단계: 약품명으로 개요 + 제품허가 병렬 조회
     const resolvedName = pillData?.itemName || pillData?.ITEM_NAME
     if (resolvedName && !drugInfo) {
-      ;[drugInfo, permitInfo] = await Promise.all([
+      const [di, pi] = await Promise.all([
         fetchMfdsInfo(resolvedName),
         fetchDrugPermission(resolvedName),
       ])
+      if (di) drugInfo = di
+      if (pi) permitInfo = pi
     }
   }
 
@@ -730,25 +785,75 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
     let efcySummary = drugInfo?.efcyQesitm || ''
     let atpnSummary = drugInfo?.atpnQesitm || ''
     let useSummary  = drugInfo?.useMethodQesitm || ''
+    let sideEffects = drugInfo?.seQesitm || ''
     if (efcySummary.length > 100) efcySummary = await summarizeMfdsText('효능', efcySummary)
     if (atpnSummary.length > 100) atpnSummary = await summarizeMfdsText('주의사항', atpnSummary)
     if (useSummary.length  > 80)  useSummary  = await summarizeMfdsText('복용법', useSummary)
 
-    // drugInfo 없으면 pillInfo CLASS_NAME + Groq 요약으로 폴백
+    // drugInfo 없으면 제품허가 EE/UD/NB 데이터로 폴백 (43,236종 커버)
+    if (!efcySummary && permitInfo?.eeDoc) efcySummary = permitInfo.eeDoc.length > 100 ? await summarizeMfdsText('효능', permitInfo.eeDoc) : permitInfo.eeDoc
+    if ((!useSummary || useSummary === '-') && permitInfo?.udDoc) useSummary = permitInfo.udDoc.length > 100 ? await summarizeMfdsText('복용법', permitInfo.udDoc) : permitInfo.udDoc
+    if (!atpnSummary && permitInfo?.nbDoc) atpnSummary = permitInfo.nbDoc.length > 100 ? await summarizeMfdsText('주의사항', permitInfo.nbDoc) : permitInfo.nbDoc
+
+    // drugInfo도 제품허가도 없으면 Groq AI 폴백
     const pillName = pillData.itemName || pillData.ITEM_NAME
-    if (!efcySummary && pillData.CLASS_NAME) {
-      efcySummary = `[${pillData.CLASS_NAME}] 분류 의약품입니다.`
-    }
-    if (!efcySummary && pillName) {
+    const className = pillData.CLASS_NAME || ''
+    const etcOtcRaw = pillData.ETC_OTC_NAME || permitInfo?.etcOtcName || ''
+    const isPrescription = etcOtcRaw.includes('전문')
+    if ((!efcySummary || !useSummary || useSummary === '-' || !atpnSummary) && pillName) {
       try {
+        const classHint = className ? `\n\n중요: 이 약은 식약처에 "${className}" 분류로 등록된 의약품입니다. 이 분류에 맞는 효능만 답하세요. 분류와 다른 효능을 지어내지 마세요.` : ''
+        const rxHint = isPrescription ? ' 이 약은 전문의약품(처방약)입니다.' : ''
         const data = await safeFetchGroq({
           model: GROQ_MODEL,
-          messages: [{ role: 'user', content: `"${pillName}" 약의 효능과 용도를 1~2문장으로 간단히 알려주세요. 모르면 "정보 없음"이라고만 답해주세요.` }],
-          temperature: 0.3, max_tokens: 100,
+          messages: [
+            { role: 'system', content: `당신은 한국 의약품 정보 전문가입니다. 반드시 한국어로만 답하세요. 영어, 베트남어 등 외국어를 절대 섞지 마세요. 모르는 정보는 추측하지 말고 "정보 없음"이라고 답하세요.${classHint}` },
+            { role: 'user', content: `한국 의약품 "${pillName}"의 정보를 알려주세요.${rxHint}\n효능: (이 약의 구체적 치료 효과 1문장. "~에 효과가 있습니다" 형식)\n복용법: (식전/식후/식간 중 언제 복용하는지 + 1일 복용횟수와 용량. 1문장)\n부작용: (이 약 복용 시 나타날 수 있는 대표적 부작용 1문장)\n주의사항: (가장 중요한 금기사항 1문장)` }
+          ],
+          temperature: 0.1, max_tokens: 200,
         })
-        const answer = data.choices?.[0]?.message?.content?.trim()
-        if (answer && !answer.includes('정보 없음')) efcySummary = answer
+        const answer = data.choices?.[0]?.message?.content?.trim() || ''
+        if (!answer.includes('정보 없음')) {
+          const efcyMatch = answer.match(/효능[:\s]*(.+?)(?=\n|복용법|$)/s)
+          const useMatch = answer.match(/복용법[:\s]*(.+?)(?=\n|부작용|주의사항|$)/s)
+          const sideMatch = answer.match(/부작용[:\s]*(.+?)(?=\n|주의사항|$)/s)
+          const warnMatch = answer.match(/주의사항[:\s]*(.+?)$/s)
+          // 라벨 있으면 라벨 기준 파싱
+          if (efcyMatch || useMatch || sideMatch || warnMatch) {
+            if (!efcySummary && efcyMatch?.[1]?.trim()) efcySummary = efcyMatch[1].trim()
+            if ((!useSummary || useSummary === '-') && useMatch?.[1]?.trim()) useSummary = useMatch[1].trim()
+            if (sideMatch?.[1]?.trim()) sideEffects = sideMatch[1].trim()
+            if (!atpnSummary && warnMatch?.[1]?.trim()) atpnSummary = warnMatch[1].trim()
+          } else {
+            // 라벨 없으면 줄 순서로 파싱 (효능/복용법/부작용/주의사항)
+            const lines = answer.split('\n').map(l => l.trim()).filter(Boolean)
+            if (lines[0] && !efcySummary) efcySummary = lines[0]
+            if (lines[1] && (!useSummary || useSummary === '-')) useSummary = lines[1]
+            if (lines[2]) sideEffects = lines[2]
+            if (lines[3] && !atpnSummary) atpnSummary = lines[3]
+          }
+        }
       } catch { /* Groq 실패 시 무시 */ }
+    }
+    if (!efcySummary && className) {
+      const classEfcyMap = {
+        '해열진통소염제': '열을 내리고 통증을 완화하며 염증을 가라앉히는 데 효과가 있습니다.',
+        '소화기관용약': '소화불량, 위장장애, 구역, 구토 등 소화기 증상 개선에 효과가 있습니다.',
+        '항히스타민제': '알레르기 증상(재채기, 콧물, 가려움 등)을 완화하는 데 효과가 있습니다.',
+        '진해거담제': '기침을 가라앉히고 가래를 삭이는 데 효과가 있습니다.',
+        '항생물질제제': '세균 감염을 치료하는 항생제입니다.',
+        '혈압강하제': '높은 혈압을 낮추는 데 효과가 있습니다.',
+        '혈당강하제': '혈당을 조절하여 당뇨병 치료에 사용됩니다.',
+        '정신신경용제': '불안, 우울, 불면 등 정신신경계 증상 완화에 사용됩니다.',
+        '순환계용약': '혈액순환 개선에 효과가 있습니다.',
+      }
+      const matched = Object.entries(classEfcyMap).find(([k]) => className.includes(k))
+      efcySummary = matched ? matched[1] : `${className} 계열 의약품입니다.`
+    }
+    if (isPrescription) {
+      if (!useSummary || useSummary === '-') useSummary = '전문의약품(처방약)으로, 의사의 처방에 따라 복용하세요.'
+      if (atpnSummary) atpnSummary = `이 약은 전문의약품(처방약)입니다. ${atpnSummary}`
+      else atpnSummary = '이 약은 전문의약품(처방약)이므로 반드시 의사의 처방을 받아 복용하세요.'
     }
     if (!atpnSummary) atpnSummary = '복용 전 약사에게 확인하세요.'
 
@@ -759,8 +864,11 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
       summary: pillName || pillFeature.drugName || `${pillFeature.color} ${pillFeature.shape} 알약`,
       drugNameForSearch: pillName,
       description: efcySummary || '',
+      className: className || '',
+      isPrescription,
       visualDescription: `${pillFeature.color}색 ${pillFeature.shape} 알약이에요.`,
       warnings: atpnSummary || '복용 전 약사에게 확인하세요.',
+      sideEffects: sideEffects || '',
       dosageGuide: useSummary || '-',
       interactions: drugInfo?.intrcQesitm ? [drugInfo.intrcQesitm.slice(0, 60)] : [],
       activeIngredients: permitInfo?.ingrName ? [permitInfo.ingrName] : pillName ? [pillName] : [],
@@ -867,8 +975,11 @@ const buildChatSystemPrompt = (analysisResult, mfdsInfo, userConditions) => {
   const pct = Math.round((analysisResult?.confidence || 0) * 100)
   const drugName = analysisResult?.summary || '미분석'
 
+  const langRule = '반드시 한국어로만 답변하세요. 영어, 한자(漢字), 베트남어 등 외국어를 절대 섞지 마세요. 성분명·학명도 한글로 표기하세요.'
+
   const highConfidencePrompt = `
 당신은 식약처 공공 데이터를 기반으로 의약품 정보를 설명하는 '의약품 정보 분석 전문가'입니다.
+${langRule}
 AI는 약물의 종류를 식별할 뿐 복용, 처방, 치료 적합성 판단을 하지 않습니다.
 모든 설명의 근거는 식약처 공식 허가 데이터입니다.
 
@@ -893,6 +1004,7 @@ ${mfdsInfo ? `\n식품의약품안전처 공식 정보:\n- 효능: ${mfdsInfo.ef
 
   const midConfidencePrompt = `
 당신은 식약처 공공 데이터를 기반으로 의약품 정보를 매칭해주는 '의약품 정보 분석 전문가'입니다.
+${langRule}
 현재 분석 일치율은 ${pct}%로 중간 수준입니다.
 
 [응답 원칙]
@@ -908,6 +1020,7 @@ ${mfdsInfo ? `\n식품의약품안전처 공식 정보:\n- 효능: ${mfdsInfo.ef
 
   const lowConfidencePrompt = `
 당신은 식약처 공공 데이터를 기반으로 의약품 정보를 매칭해주는 '의약품 정보 분석 전문가'입니다.
+${langRule}
 현재 분석 일치율은 ${pct}%로 안전한 정보 제공이 어렵습니다.
 
 [응답 원칙]
@@ -1039,11 +1152,12 @@ function DurWarningCard({ warnings }) {
     임부금기:   { bg: 'bg-pink-50',   border: 'border-pink-200',   badge: 'bg-pink-100 text-pink-700',  icon: '🤰' },
     노인주의:   { bg: 'bg-amber-50',  border: 'border-amber-200',  badge: 'bg-amber-100 text-amber-700',icon: '👴' },
     효능군중복: { bg: 'bg-orange-50', border: 'border-orange-200', badge: 'bg-orange-100 text-orange-700', icon: '⚠️' },
+    부작용:     { bg: 'bg-purple-50', border: 'border-purple-200', badge: 'bg-purple-100 text-purple-700', icon: '⚠️' },
   }
   return (
     <div className="space-y-3 animate-slide-up">
       <p className="text-xs font-bold text-red-400 uppercase tracking-wide px-1 flex items-center gap-1">
-        <span>🛡️</span> DUR 안전성 경고 {warnings.length}건
+        <span>🛡️</span> DUR 안전성 정보 {warnings.length}건
       </p>
       {warnings.map((w, i) => {
         const s = TYPE_STYLE[w.type] || TYPE_STYLE['효능군중복']
@@ -1337,7 +1451,7 @@ function PillListCard({ pillResults, onSelectPill, selectedIdx, onCorrectPill })
                     </div>
                     <div className="flex gap-2">
                       <span className="text-xs font-bold text-slate-400 w-14 shrink-0">효능</span>
-                      <span className="text-xs text-slate-600">{pill.description || '식약처 효능 데이터 없음'}</span>
+                      <span className="text-xs text-slate-600">{pill.description || '효능 데이터 없음'}</span>
                     </div>
                     <div className="flex gap-2">
                       <span className="text-xs font-bold text-slate-400 w-14 shrink-0">복용법</span>
@@ -1403,9 +1517,11 @@ function AnalysisEvidenceCard({ pill, symptom, pillCount = 1 }) {
   const isLow = confidenceBand === 'low'
   const hasMultiplePills = pillCount > 1
   const symptomText = symptom?.trim() || '입력하신 증상'
-  const approvedPurpose = pill.description || '식약처 효능 데이터가 확인되지 않았습니다.'
-  const dosageText = pill.dosageGuide && pill.dosageGuide !== '-' ? pill.dosageGuide : '상세 가이드 보기'
-  const warningText = pill.warnings || '식약처 데이터 없음'
+  const pillClassName = pill.className || ''
+  const approvedPurpose = pillClassName || pill.description || ''
+  const dosageText = pill.dosageGuide && pill.dosageGuide !== '-' ? pill.dosageGuide : '복용 전 약사에게 문의하세요.'
+  const warningText = pill.warnings || '복용 전 약사에게 확인하세요.'
+  const efcyText = pill.description || ''
 
   return (
     <div className={`rounded-2xl p-4 border-2 animate-slide-up space-y-3 ${isLow ? 'border-amber-200 bg-amber-50' : 'border-blue-200 bg-blue-50'}`}>
@@ -1421,30 +1537,32 @@ function AnalysisEvidenceCard({ pill, symptom, pillCount = 1 }) {
           <p className="text-xs text-slate-600 leading-relaxed mt-1">아래 정보는 식약처 데이터와 대조된 약품 정보입니다.</p>
         </div>
       </div>
-      {hasMultiplePills ? (
-        <div className="rounded-xl bg-white p-3 border border-slate-100">
-          <p className="text-sm text-slate-700 leading-relaxed font-medium">
-            여러 알약이 감지되었습니다. 각 알약별 성분, 복용법, 주의사항은 아래 알약 카드에서 확인해 주세요.
-          </p>
-        </div>
-      ) : (
-        <div className="rounded-xl bg-white p-3 border border-slate-100">
-          <p className="text-[10px] font-black text-slate-400 uppercase mb-2">분석된 알약 정보</p>
-          <div className="space-y-2 text-sm text-slate-700 leading-relaxed font-medium">
-            <p>• {pill.summary}</p>
-            <p>• 주요 성분: {pill.activeIngredients?.join(', ') || '식약처 데이터 없음'}</p>
-            <div className="rounded-xl bg-slate-50 p-3 border border-slate-100">
-              <p>
-                본 성분은 주로 [{approvedPurpose}] 목적으로 허가되었으며,
-                식약처 승인 기준 [{symptomText}] 치료 및 완화용으로 승인된 성분이 아닙니다.
+      <div className="rounded-xl bg-white p-3 border border-slate-100">
+        <p className="text-[10px] font-black text-slate-400 uppercase mb-2">분석된 알약 정보</p>
+        <div className="space-y-2 text-sm text-slate-700 leading-relaxed font-medium">
+          <p className="font-bold">• {pill.summary}{pill.isPrescription ? ' (전문의약품)' : ''}</p>
+          {approvedPurpose ? (
+            <div className="rounded-xl bg-green-50 p-3 border border-green-200">
+              <p className="text-green-800">
+                {hasMultiplePills
+                  ? `이 약들은 ${approvedPurpose.replace(/[\[\]]/g, '')} 목적으로 허가된 의약품입니다.`
+                  : `이 약은 ${approvedPurpose.replace(/[\[\]]/g, '')} 목적으로 허가된 의약품입니다.`}
+                {symptom?.trim() && (approvedPurpose.includes(symptom.trim()) || ['두통','발열','통증','소화','기침','위','장'].some(k => symptom.includes(k) && approvedPurpose.includes(k))
+                  ? ` 사용자님의 [${symptomText}] 증상에 도움이 될 수 있습니다.`
+                  : ` 사용자님의 [${symptomText}] 증상 목적으로 허가된 제품이 아닐 수 있습니다.`)}
               </p>
             </div>
-            <p>• 복용법: {dosageText}</p>
-            <p>• 주의사항: {warningText}</p>
-            <p>• 더 정확한 확인이 필요하신가요? 약사 커뮤니티를 이용해 주세요.</p>
-          </div>
+          ) : (
+            <div className="rounded-xl bg-slate-50 p-3 border border-slate-100">
+              <p>식약처 허가 분류 정보를 확인할 수 없습니다.</p>
+            </div>
+          )}
+          {efcyText && <p>• 효능: {efcyText}</p>}
+          <p>• 복용법: {dosageText}</p>
+          <p>• 주의사항: {warningText}</p>
+          {isLow && <p>• 더 정확한 확인이 필요하신가요? 약사 커뮤니티를 이용해 주세요.</p>}
         </div>
-      )}
+      </div>
       {isLow && <CommunityButton />}
     </div>
   )
@@ -1761,7 +1879,7 @@ function ChatView({ result, mfdsInfo, userConditions, onBack }) {
           ...history,
           { role: 'user', content: text }
         ],
-        temperature: 0.7,
+        temperature: 0.3,
         max_tokens: 600,
       })
       const reply = data.choices?.[0]?.message?.content || '죄송합니다, 응답을 가져오지 못했어요.'
@@ -2841,7 +2959,7 @@ export default function App() {
 
     if (multiResult && multiResult.pillsIdentified >= 2) {
       console.log(`🔬 SAM: ${multiResult.pillsIdentified}개 약 감지`)
-      const multiPills = multiResult.results.map(r => {
+      const rawPills = multiResult.results.map(r => {
         const top = r.pills[0]
         const conf = r.confidence
         const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
@@ -2854,25 +2972,83 @@ export default function App() {
           bbox: r.bbox,
         }
       })
-      aiResult = {
-        pills: multiPills,
-        totalCount: multiPills.length,
-        symptomHint: '',
-        dlConfidenceLevel: multiPills[0].confidence >= 0.75 ? '높음' : '보통',
-        multiMode: true,
+      // 같은 약 이름 중복 제거 — 가장 높은 유사도만 남김
+      const isSameDrug = (a, b) => {
+        const na = a.replace(/\s|\(.*\)/g, ''), nb = b.replace(/\s|\(.*\)/g, '')
+        if (na === nb) return true
+        const short = Math.min(na.length, nb.length, 4)
+        return na.slice(0, short) === nb.slice(0, short)
+      }
+      const deduped = []
+      for (const p of rawPills) {
+        const existing = deduped.find(d => isSameDrug(d.drugName, p.drugName))
+        if (existing) {
+          if (p.confidence > existing.confidence) Object.assign(existing, p)
+        } else {
+          deduped.push({ ...p })
+        }
+      }
+      console.log(`🔬 중복 제거: ${rawPills.length}개 → ${deduped.length}개`)
+      const multiPills = deduped
+      if (multiPills.length >= 2) {
+        aiResult = {
+          pills: multiPills,
+          totalCount: multiPills.length,
+          symptomHint: '',
+          dlConfidenceLevel: multiPills[0].confidence >= 0.75 ? '높음' : '보통',
+          multiMode: true,
+        }
+      } else {
+        // 중복 제거 후 1종류면 단일약 모드로 전환
+        const p = multiPills[0]
+        const confLabel = p.confidence >= 0.75 ? '높음' : p.confidence >= 0.45 ? '보통' : '낮음'
+        console.log(`🧠 SAM 중복 제거 → 단일약 모드: ${p.drugName}`)
+        aiResult = {
+          pills: [p],
+          totalCount: 1,
+          symptomHint: '',
+          dlConfidenceLevel: confLabel,
+        }
       }
     } else {
       const dlResult = await fetchModelInference(imageDataUrl)
 
       if (dlResult && !dlResult.isPill) {
-        setAnalysisResult({
-          statusCode: 'unidentified',
-          summary: '약이 아닙니다',
-          description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
-          confidence: 0,
-        })
-        setAnalyzing(false)
-        return
+        try {
+          console.log('🧠 DL OOD 판정 → Groq Vision 2차 확인 중...')
+          const checkData = await safeFetchGroq({
+            model: GROQ_VISION_MODEL,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: '이 이미지에 알약(경구 의약품)이 있습니까? "예" 또는 "아니오"로만 답하세요.' },
+                { type: 'image_url', image_url: { url: imageDataUrl } },
+              ],
+            }],
+            temperature: 0.1, max_tokens: 10,
+          })
+          const answer = checkData.choices?.[0]?.message?.content?.trim() || ''
+          if (!answer.includes('예')) {
+            setAnalysisResult({
+              statusCode: 'unidentified',
+              summary: '약이 아닙니다',
+              description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
+              confidence: 0,
+            })
+            setAnalyzing(false)
+            return
+          }
+          console.log('🧠 Groq: 약 맞음 → DL OOD 무시하고 Groq Vision 분석으로 전환')
+        } catch {
+          setAnalysisResult({
+            statusCode: 'unidentified',
+            summary: '약이 아닙니다',
+            description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
+            confidence: 0,
+          })
+          setAnalyzing(false)
+          return
+        }
       }
 
       if (dlResult?.isPill && dlResult.pills?.length > 0) {
@@ -2922,7 +3098,18 @@ export default function App() {
 
     setMfdsLoading(true)
     try {
-      const results = await Promise.all(aiResult.pills.map(pill => analyzeSinglePill(pill, aiResult.symptomHint)))
+      const rawResults = await Promise.all(aiResult.pills.map(pill => analyzeSinglePill(pill, aiResult.symptomHint)))
+      // 식약처 조회 후 같은 약 dedup (이름 앞 4글자 기준)
+      const results = []
+      for (const r of rawResults) {
+        const rName = (r.summary || '').replace(/\s|\(.*\)/g, '').slice(0, 4)
+        const dup = results.find(d => (d.summary || '').replace(/\s|\(.*\)/g, '').slice(0, 4) === rName)
+        if (dup) {
+          if ((r.confidence || 0) > (dup.confidence || 0)) Object.assign(dup, r)
+        } else {
+          results.push(r)
+        }
+      }
       setPillResults(results); setAnalysisResult(results[0])
       const combined = await analyzePillsCombined(results, symptom)
       setCombinedAnalysis(combined)
