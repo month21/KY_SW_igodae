@@ -64,7 +64,7 @@ def load_model():
     print(f'🔧 디바이스: {DEVICE}')
 
     # 체크포인트 로드
-    ckpt_path = OUTPUT_DIR / 'best_model.pth'
+    ckpt_path = OUTPUT_DIR / 'best_model_v1226.pth'
     if not ckpt_path.exists():
         print(f'❌ 모델 파일 없음: {ckpt_path}')
         print('   train.py로 학습을 먼저 완료하세요.')
@@ -231,10 +231,27 @@ def inference_multi():
 
         masks = sam_generator.generate(img_np)
 
-        # 면적순 정렬 (큰 마스크 = 약일 확률 높음), 너무 큰 마스크(전체 이미지) 제외
         total_area = img_np.shape[0] * img_np.shape[1]
-        masks = [m for m in masks if m['area'] < total_area * 0.8 and m['area'] > total_area * 0.005]
-        masks = sorted(masks, key=lambda x: x['area'], reverse=True)[:10]
+        masks = [m for m in masks if m['area'] < total_area * 0.8 and m['area'] > total_area * 0.02]
+        masks = sorted(masks, key=lambda x: x['area'], reverse=True)
+
+        # 겹치는 마스크 제거 (IoU > 50%면 큰 쪽만 남김)
+        filtered = []
+        for m in masks:
+            bx, by, bw, bh = m['bbox']
+            keep = True
+            for f in filtered:
+                fx, fy, fw, fh = f['bbox']
+                ix1, iy1 = max(bx, fx), max(by, fy)
+                ix2, iy2 = min(bx+bw, fx+fw), min(by+bh, fy+fh)
+                inter = max(0, ix2-ix1) * max(0, iy2-iy1)
+                union = bw*bh + fw*fh - inter
+                if union > 0 and inter / union > 0.5:
+                    keep = False
+                    break
+            if keep:
+                filtered.append(m)
+        masks = filtered[:6]
 
         pill_results = []
         for i, mask_data in enumerate(masks):

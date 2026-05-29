@@ -19,6 +19,10 @@ export default async function handler(req, res) {
     drugInfo:   'https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList',
     pillInfo:   'https://apis.data.go.kr/1471000/MdcinGrnIdntfcInfoService03/getMdcinGrnIdntfcInfoList03',
     permission: 'https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnDtlInq06',
+    durCombination: 'https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getUsjntTabooInfoList03',
+    durPregnancy:   'https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getPwnmTabooInfoList03',
+    durElderly:     'https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getOdsnAtentInfoList03',
+    durDuplicate:   'https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getEfcyDplctInfoList03',
   }
 
   const targetBase = ALLOWED_ENDPOINTS[endpoint]
@@ -27,7 +31,10 @@ export default async function handler(req, res) {
   }
 
   // 식약처 API 키는 서버 환경변수에서 주입 (VITE_ prefix 없이 저장 권장)
-  const serviceKey = process.env.MFDS_API_KEY || process.env.VITE_MFDS_API_KEY
+  const isDur = endpoint?.startsWith('dur')
+  const serviceKey = isDur
+    ? (process.env.DUR_API_KEY || process.env.MFDS_API_KEY || process.env.VITE_MFDS_API_KEY)
+    : (process.env.MFDS_API_KEY || process.env.VITE_MFDS_API_KEY)
   if (!serviceKey) {
     return res.status(500).json({ error: 'MFDS_API_KEY not configured' })
   }

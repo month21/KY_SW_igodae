@@ -58,6 +58,10 @@ function mfdsDevProxy(env) {
     drugInfo: 'https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList',
     pillInfo: 'https://apis.data.go.kr/1471000/MdcinGrnIdntfcInfoService03/getMdcinGrnIdntfcInfoList03',
     permission: 'https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnDtlInq06',
+    durCombination: 'https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getUsjntTabooInfoList03',
+    durPregnancy: 'https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getPwnmTabooInfoList03',
+    durElderly: 'https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getOdsnAtentInfoList03',
+    durDuplicate: 'https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getEfcyDplctInfoList03',
   }
 
   return {
@@ -68,7 +72,10 @@ function mfdsDevProxy(env) {
           const url = new URL(req.url || '', 'http://localhost')
           const endpoint = url.searchParams.get('endpoint')
           const targetBase = endpoints[endpoint]
-          const serviceKey = env.MFDS_API_KEY || env.VITE_MFDS_API_KEY
+          const isDur = endpoint?.startsWith('dur')
+          const serviceKey = isDur
+            ? (env.DUR_API_KEY || env.MFDS_API_KEY || env.VITE_MFDS_API_KEY)
+            : (env.MFDS_API_KEY || env.VITE_MFDS_API_KEY)
 
           res.setHeader('Access-Control-Allow-Origin', '*')
           res.setHeader('Content-Type', 'application/json; charset=utf-8')
