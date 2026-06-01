@@ -355,7 +355,14 @@ async function fetchMultiPillInference(base64WithPrefix) {
   }
 }
 
-// ─── 식약처 텍스트 AI 요약 ───────────────────────────────────────────────────
+// ─── 클라이언트 문장 자르기 (Groq 왕복 없이 즉시) ────────────────────────────
+function trimToSentences(text, n = 2) {
+  if (!text) return ''
+  const t = String(text).trim()
+  return t.split(/(?<=[.!?。])\s+/).slice(0, n).join(' ').trim()
+}
+
+// ─── 식약처 텍스트 AI 요약 (현재 미사용 — 클라이언트 자르기로 대체) ──────────────
 async function summarizeMfdsText(label, text) {
   if (!text || text.length < 50) return text
   try {
@@ -657,7 +664,7 @@ async function runDurCheck(pillResults, userProfile = {}) {
 
   // 약 부작용을 DUR 카드에 포함
   const pillWarnings = pillResults
-    .filter(p => p.sideEffects)
+    .filter(p => p.sideEffects && p.sideEffects.trim().length >= 10)
     .map(p => ({
       type: '부작용', level: 'info', drugs: [p.drugNameForSearch || p.summary],
       reason: p.sideEffects,
@@ -787,55 +794,24 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
     let atpnSummary = drugInfo?.atpnQesitm || ''
     let useSummary  = drugInfo?.useMethodQesitm || ''
     let sideEffects = drugInfo?.seQesitm || ''
-    if (efcySummary.length > 100) efcySummary = await summarizeMfdsText('효능', efcySummary)
-    if (atpnSummary.length > 100) atpnSummary = await summarizeMfdsText('주의사항', atpnSummary)
-    if (useSummary.length  > 80)  useSummary  = await summarizeMfdsText('복용법', useSummary)
+    // 작업2: Groq 요약 제거 → 클라이언트에서 앞 문장만 자르기 (왕복 0초, 원문 보존은 별도 필드)
+    const efcyFull = efcySummary, atpnFull = atpnSummary, useFull = useSummary
+    efcySummary = trimToSentences(efcySummary, 2)
+    atpnSummary = trimToSentences(atpnSummary, 3)
+    useSummary  = trimToSentences(useSummary, 2)
 
-    // drugInfo 없으면 제품허가 EE/UD/NB 데이터로 폴백 (43,236종 커버)
-    if (!efcySummary && permitInfo?.eeDoc) efcySummary = permitInfo.eeDoc.length > 100 ? await summarizeMfdsText('효능', permitInfo.eeDoc) : permitInfo.eeDoc
-    if ((!useSummary || useSummary === '-') && permitInfo?.udDoc) useSummary = permitInfo.udDoc.length > 100 ? await summarizeMfdsText('복용법', permitInfo.udDoc) : permitInfo.udDoc
-    if (!atpnSummary && permitInfo?.nbDoc) atpnSummary = permitInfo.nbDoc.length > 100 ? await summarizeMfdsText('주의사항', permitInfo.nbDoc) : permitInfo.nbDoc
+    // drugInfo 없으면 제품허가 EE/UD/NB 데이터로 폴백
+    if (!efcySummary && permitInfo?.eeDoc) efcySummary = trimToSentences(permitInfo.eeDoc, 2)
+    if ((!useSummary || useSummary === '-') && permitInfo?.udDoc) useSummary = trimToSentences(permitInfo.udDoc, 2)
+    if (!atpnSummary && permitInfo?.nbDoc) atpnSummary = trimToSentences(permitInfo.nbDoc, 3)
 
     // drugInfo도 제품허가도 없으면 Groq AI 폴백
     const pillName = pillData.itemName || pillData.ITEM_NAME
     const className = pillData.CLASS_NAME || ''
     const etcOtcRaw = pillData.ETC_OTC_NAME || permitInfo?.etcOtcName || ''
     const isPrescription = etcOtcRaw.includes('전문')
-    if ((!efcySummary || !useSummary || useSummary === '-' || !atpnSummary) && pillName) {
-      try {
-        const classHint = className ? `\n\n중요: 이 약은 식약처에 "${className}" 분류로 등록된 의약품입니다. 이 분류에 맞는 효능만 답하세요. 분류와 다른 효능을 지어내지 마세요.` : ''
-        const rxHint = isPrescription ? ' 이 약은 전문의약품(처방약)입니다.' : ''
-        const data = await safeFetchGroq({
-          model: GROQ_MODEL,
-          messages: [
-            { role: 'system', content: `당신은 한국 의약품 정보 전문가입니다. 반드시 한국어로만 답하세요. 영어, 베트남어 등 외국어를 절대 섞지 마세요. 모르는 정보는 추측하지 말고 "정보 없음"이라고 답하세요.${classHint}` },
-            { role: 'user', content: `한국 의약품 "${pillName}"의 정보를 알려주세요.${rxHint}\n효능: (이 약의 구체적 치료 효과 1문장. "~에 효과가 있습니다" 형식)\n복용법: (식전/식후/식간 중 언제 복용하는지 + 1일 복용횟수와 용량. 1문장)\n부작용: (이 약 복용 시 나타날 수 있는 대표적 부작용 1문장)\n주의사항: (가장 중요한 금기사항 1문장)` }
-          ],
-          temperature: 0.1, max_tokens: 200,
-        })
-        const answer = data.choices?.[0]?.message?.content?.trim() || ''
-        if (!answer.includes('정보 없음')) {
-          const efcyMatch = answer.match(/효능[:\s]*(.+?)(?=\n|복용법|$)/s)
-          const useMatch = answer.match(/복용법[:\s]*(.+?)(?=\n|부작용|주의사항|$)/s)
-          const sideMatch = answer.match(/부작용[:\s]*(.+?)(?=\n|주의사항|$)/s)
-          const warnMatch = answer.match(/주의사항[:\s]*(.+?)$/s)
-          // 라벨 있으면 라벨 기준 파싱
-          if (efcyMatch || useMatch || sideMatch || warnMatch) {
-            if (!efcySummary && efcyMatch?.[1]?.trim()) efcySummary = efcyMatch[1].trim()
-            if ((!useSummary || useSummary === '-') && useMatch?.[1]?.trim()) useSummary = useMatch[1].trim()
-            if (sideMatch?.[1]?.trim()) sideEffects = sideMatch[1].trim()
-            if (!atpnSummary && warnMatch?.[1]?.trim()) atpnSummary = warnMatch[1].trim()
-          } else {
-            // 라벨 없으면 줄 순서로 파싱 (효능/복용법/부작용/주의사항)
-            const lines = answer.split('\n').map(l => l.trim()).filter(Boolean)
-            if (lines[0] && !efcySummary) efcySummary = lines[0]
-            if (lines[1] && (!useSummary || useSummary === '-')) useSummary = lines[1]
-            if (lines[2]) sideEffects = lines[2]
-            if (lines[3] && !atpnSummary) atpnSummary = lines[3]
-          }
-        }
-      } catch { /* Groq 실패 시 무시 */ }
-    }
+    // 작업3: Groq 정보채우기 폴백 제거 — "이 나타날 수 있습니다" 같은 깨진 조각 차단 + 속도↑
+    // (효능/복용법/주의사항/부작용은 식약처 실데이터만 사용, 없으면 아래 분류/처방약 기본문구)
     if (!efcySummary && className) {
       const classEfcyMap = {
         '해열진통소염제': '열을 내리고 통증을 완화하며 염증을 가라앉히는 데 효과가 있습니다.',
@@ -2958,7 +2934,7 @@ export default function App() {
     // ── 1단계: SAM 멀티약 시도 → 단일 DL → Groq 순서 ──
     const multiResult = await fetchMultiPillInference(imageDataUrl)
 
-    if (multiResult && multiResult.pillsIdentified >= 2) {
+    if (multiResult && multiResult.pillsIdentified >= 1) {
       console.log(`🔬 SAM: ${multiResult.pillsIdentified}개 약 감지`)
       const rawPills = multiResult.results.map(r => {
         const top = r.pills[0]
@@ -3014,42 +2990,16 @@ export default function App() {
     } else {
       const dlResult = await fetchModelInference(imageDataUrl)
 
+      // 작업1: DL이 "약 아님" 판정 → Groq Vision 재확인 없이 즉시 표시 (속도↑)
       if (dlResult && !dlResult.isPill) {
-        try {
-          console.log('🧠 DL OOD 판정 → Groq Vision 2차 확인 중...')
-          const checkData = await safeFetchGroq({
-            model: GROQ_VISION_MODEL,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'text', text: '이 이미지에 알약(경구 의약품)이 있습니까? "예" 또는 "아니오"로만 답하세요.' },
-                { type: 'image_url', image_url: { url: imageDataUrl } },
-              ],
-            }],
-            temperature: 0.1, max_tokens: 10,
-          })
-          const answer = checkData.choices?.[0]?.message?.content?.trim() || ''
-          if (!answer.includes('예')) {
-            setAnalysisResult({
-              statusCode: 'unidentified',
-              summary: '약이 아닙니다',
-              description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
-              confidence: 0,
-            })
-            setAnalyzing(false)
-            return
-          }
-          console.log('🧠 Groq: 약 맞음 → DL OOD 무시하고 Groq Vision 분석으로 전환')
-        } catch {
-          setAnalysisResult({
-            statusCode: 'unidentified',
-            summary: '약이 아닙니다',
-            description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
-            confidence: 0,
-          })
-          setAnalyzing(false)
-          return
-        }
+        setAnalysisResult({
+          statusCode: 'unidentified',
+          summary: '약이 아닙니다',
+          description: '실제 약 이미지를 촬영해주세요. (그림, 사탕, 동전 등은 인식되지 않습니다)',
+          confidence: 0,
+        })
+        setAnalyzing(false)
+        return
       }
 
       if (dlResult?.isPill && dlResult.pills?.length > 0) {
@@ -3070,24 +3020,15 @@ export default function App() {
           dlConfidenceLevel: confLabel,
         }
       } else {
-        // ── DL 모델 미연결 또는 실패 → 기존 Groq 단독 ──
-        try {
-          const data = await safeFetchGroq({
-            model: GROQ_VISION_MODEL,
-            messages: [{ role: 'user', content: [
-              { type: 'text', text: buildVisionPrompt(userConditions, symptom) },
-              { type: 'image_url', image_url: { url: imageDataUrl } }
-            ]}],
-            temperature: 0.1,
-            max_tokens: 1000,
-          })
-          const raw = data.choices?.[0]?.message?.content || '{}'
-          aiResult = JSON.parse(raw.replace(/```json|```/g, '').trim())
-        } catch (e) {
-          setAnalysisResult({ statusCode: 'unidentified', summary: '분석 실패', description: e.message, confidence: 0 })
-          setAnalyzing(false)
-          return
-        }
+        // 작업1: DL 미연결/실패 → Groq 단독(한국약 지식 없음) 대신 재촬영 안내
+        setAnalysisResult({
+          statusCode: 'unidentified',
+          summary: '분석 실패',
+          description: 'AI 모델 서버에 연결되지 않았습니다. 잠시 후 다시 시도하거나 다시 촬영해주세요.',
+          confidence: 0,
+        })
+        setAnalyzing(false)
+        return
       }
     }
 
@@ -3112,7 +3053,8 @@ export default function App() {
         }
       }
       setPillResults(results); setAnalysisResult(results[0])
-      const combined = await analyzePillsCombined(results, symptom)
+      // 작업5: 단일 약은 종합분석(Groq 왕복) 스킵 — 2개 이상일 때만 상호작용 분석
+      const combined = results.length >= 2 ? await analyzePillsCombined(results, symptom) : null
       setCombinedAnalysis(combined)
       const userProfile = {
         isPregnant: userConditions.includes('임신') || userConditions.includes('임부'),

@@ -46,12 +46,12 @@ MFDS_DRUG_URL = 'https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEa
 
 EMB_DIM    = 512
 BATCH_SIZE = 64
-EPOCHS     = 20
+EPOCHS     = 5
 LR         = 3e-4
-PATIENCE   = 5
-AUG_PER_IMAGE = 30   # 원본 1장 → 30장 증강
+PATIENCE   = 3
+AUG_PER_IMAGE = 1    # AI Hub 약당 50장 다각도 → 증강 불필요
 WARM_START = True     # 이전 backbone 로드 (ArcFace head만 리셋)
-MAX_TRAIN_PILLS = 5000  # 5차: 식약처 25,551종 중 학습 대상 수
+MAX_TRAIN_PILLS = 25000  # 식약처 전체 포함
 
 # OOD (Out-of-Distribution) 방어 설정
 NEGATIVE_PER_TYPE  = 500   # 네거티브 카테고리당 생성 수
@@ -62,13 +62,10 @@ NEG_IMAGE_DIR = DATA_DIR / 'negatives'
 # 디바이스 자동 감지
 if torch.backends.mps.is_available():
     DEVICE = torch.device('mps')
-    print('✅ Apple Silicon GPU (MPS) 사용')
 elif torch.cuda.is_available():
     DEVICE = torch.device('cuda')
-    print('✅ CUDA GPU 사용')
 else:
     DEVICE = torch.device('cpu')
-    print('⚠️ CPU 사용 (느릴 수 있음)')
 
 
 # ════════════════════════════════════════════════════════════
@@ -1184,18 +1181,8 @@ class AugmentedPillDataset(Dataset):
         if aug_idx == 0:
             # 원본 (augmentation 없이)
             img = self.to_tensor_norm(img)
-        elif aug_idx < self.aug_per_image // 2:
-            # 방법 1: 배경합성 + 카메라 시뮬레이션
-            try:
-                img = composite_pill_on_background(img, bg_size=(256, 256))
-                img = camera_simulation(img)
-                if random.random() < 0.3:
-                    img = add_shadow(img)
-            except:
-                pass  # 합성 실패 시 원본 사용
-            img = self.to_tensor_norm(img)
         else:
-            # 기본 augmentation
+            # 기본 augmentation만 (배경합성/카메라시뮬 제거 — AI Hub 다각도로 대체)
             if self.transform:
                 img = self.transform(img)
             else:
@@ -1229,14 +1216,12 @@ train_transform = transforms.Compose([
     transforms.Resize((256, 256)),
     transforms.RandomCrop(224),
     transforms.RandomHorizontalFlip(),
-    transforms.RandomVerticalFlip(),
-    transforms.RandomRotation(30),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-    transforms.RandomPerspective(distortion_scale=0.2, p=0.5),
-    transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.85, 1.15)),
+    transforms.RandomRotation(15),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    transforms.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    transforms.RandomErasing(p=0.2, scale=(0.02, 0.15)),
+    transforms.RandomErasing(p=0.15, scale=(0.02, 0.10)),
 ])
 
 val_transform = transforms.Compose([
@@ -1250,7 +1235,7 @@ val_transform = transforms.Compose([
 #  학습 함수
 # ════════════════════════════════════════════════════════════
 
-def train_one_epoch(model, loader, optimizer, criterion, use_cutmix=True):
+def train_one_epoch(model, loader, optimizer, criterion, scheduler=None, use_cutmix=True):
     model.train()
     total_loss, correct, total = 0, 0, 0
 
@@ -1272,6 +1257,8 @@ def train_one_epoch(model, loader, optimizer, criterion, use_cutmix=True):
         # gradient clipping (안정성)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
+        if scheduler:
+            scheduler.step()
 
         total_loss += loss.item() * imgs.size(0)
         correct += (logits.argmax(1) == labels).sum().item()
@@ -1415,6 +1402,7 @@ def collect_corrections():
 # ════════════════════════════════════════════════════════════
 
 def main():
+    print(f'✅ Device: {DEVICE}')
     print('=' * 60)
     print('  이거돼? — 약 이미지 인식 모델 학습')
     print('  ArcFace + 고급증강 + CutMix + OOD 방어 | M4 Pro')
@@ -1423,10 +1411,10 @@ def main():
     # ── 데이터 수집 (식약처 API 2개) ──
     df = collect_data()
 
-    # ── 식약처 이미지 품질 필터 ──
+    # ── 식약처 이미지 존재 확인 (품질 필터 스킵 — 공식 이미지라 불필요) ──
     before = len(df)
-    df = df[df['image_path'].apply(lambda p: os.path.exists(p) and is_valid_pill_image(p))].reset_index(drop=True)
-    print(f'  📋 식약처 이미지 필터: {before}장 → {len(df)}장 ({before - len(df)}장 제거)')
+    df = df[df['image_path'].apply(os.path.exists)].reset_index(drop=True)
+    print(f'  📋 식약처 이미지 확인: {before}장 → {len(df)}장 ({before - len(df)}장 누락)')
 
     # ── 5차: 식약처 이미지가 충분하면 그 중에서 MAX_TRAIN_PILLS 선별 ──
     all_mfds_names = sorted(df['item_name'].unique())
@@ -1437,26 +1425,68 @@ def main():
     else:
         selected_names = set(all_mfds_names)
 
-    # ── 웹 이미지로 다양성 확보 (식약처 이미지가 있는 약만 추가 크롤링) ──
-    crawl_targets = sorted(selected_names)
-    print(f'\n🌐 Phase 1-2b: 웹 이미지 수집 (다양성 보강)')
-    print(f'  식약처 공식 이미지: {len(selected_names):,}종')
-    print(f'  웹 크롤링 대상:     {len(crawl_targets):,}종 (추가 각도/조명 확보)')
-    web_df = collect_web_images(crawl_targets)
+    # ── 웹 이미지 수집 비활성화 (AI Hub 다각도 데이터로 대체) ──
+    # crawl_targets = sorted(selected_names)
+    # print(f'\n🌐 Phase 1-2b: 웹 이미지 수집 (다양성 보강)')
+    # web_df = collect_web_images(crawl_targets)
+    # if len(web_df) > 0:
+    #     web_df = filter_web_images(web_df)
+    #     web_df_clean = web_df[['item_code', 'item_name', 'image_path']].copy()
+    #     for col in ['shape', 'color_front', 'color_back', 'print_front', 'print_back']:
+    #         if col not in web_df_clean.columns:
+    #             web_df_clean[col] = ''
+    #     df = pd.concat([df, web_df_clean], ignore_index=True)
+    print(f'\n🌐 웹 크롤링 SKIP (AI Hub 다각도 데이터로 대체)')
 
-    if len(web_df) > 0:
-        web_df = filter_web_images(web_df)
-
-        web_df_clean = web_df[['item_code', 'item_name', 'image_path']].copy()
+    # ── AI Hub 다각도 이미지 병합 ──
+    aihub_csv = DATA_DIR / 'aihub_pills.csv'
+    if not aihub_csv.exists():
+        aihub_csv = DATA_DIR / 'aihub_test_mini.csv'  # 테스트용 폴백
+    if aihub_csv.exists():
+        print(f'\n🏥 AI Hub 다각도 이미지 병합')
+        aihub_df = pd.read_csv(aihub_csv)
+        aihub_clean = aihub_df.rename(columns={'drug_code': 'item_code', 'drug_name': 'item_name'})[['item_code', 'item_name', 'image_path']].copy()
+        aihub_clean = aihub_clean[aihub_clean['image_path'].apply(os.path.exists)]
         for col in ['shape', 'color_front', 'color_back', 'print_front', 'print_back']:
-            if col not in web_df_clean.columns:
-                web_df_clean[col] = ''
-        df = pd.concat([df, web_df_clean], ignore_index=True)
-        total_classes = df['item_name'].nunique()
-        print(f'  📊 식약처 + 웹 합산 (필터 후): {len(df):,}장 ({total_classes:,}종)')
-        imgs_per_class = df.groupby('item_name').size()
-        multi = (imgs_per_class > 1).sum()
-        print(f'  2장 이상 보유 클래스: {multi:,}종 / {total_classes:,}종')
+            aihub_clean[col] = ''
+
+        # AI Hub 약 이름 → 식약처 이름 매칭 (같은 약이 다른 클래스로 학습되는 것 방지)
+        # 최적화: 행마다 25,000종 전체 루프(53억회) → 고유 이름(~8천)만 prefix 사전으로 O(1) 조회
+        import re
+        mfds_names = list(df['item_name'].unique())
+        mfds_name_set = set(mfds_names)
+        def _base(n):
+            return re.sub(r'[\s\d]|밀리그램|mg|ml|\(.*\)|/.*$', '', str(n)).strip()
+        # 식약처 이름의 앞 5글자/4글자 prefix 사전 (먼저 등장한 이름 우선)
+        mfds_p5, mfds_p4 = {}, {}
+        for mn in mfds_names:
+            b = _base(mn)
+            if len(b) >= 5:
+                mfds_p5.setdefault(b[:5], mn)
+            if len(b) >= 4:
+                mfds_p4.setdefault(b[:4], mn)
+        def match_mfds_name(aihub_name):
+            if aihub_name in mfds_name_set:
+                return aihub_name
+            b = _base(aihub_name)
+            if len(b) >= 5 and b[:5] in mfds_p5:
+                return mfds_p5[b[:5]]
+            if len(b) >= 4 and b[:4] in mfds_p4:
+                return mfds_p4[b[:4]]
+            return aihub_name  # 매칭 안 되면 새 클래스로 추가
+
+        # 고유 이름만 매칭한 뒤 전체 행에 map (212K행 반복 제거)
+        uniq_names = aihub_clean['item_name'].unique()
+        name_remap = {n: match_mfds_name(n) for n in uniq_names}
+        matched = sum(1 for n, v in name_remap.items() if n != v)
+        aihub_clean['item_name'] = aihub_clean['item_name'].map(name_remap)
+        print(f'  🔗 식약처 이름 매칭: {matched}종 통일')
+
+        before = df['item_name'].nunique()
+        df = pd.concat([df, aihub_clean], ignore_index=True)
+        after = df['item_name'].nunique()
+        print(f'  AI Hub: {len(aihub_clean):,}장 ({aihub_clean["item_name"].nunique():,}종)')
+        print(f'  📊 합산: {len(df):,}장 ({after:,}종, +{after - before}종 추가)')
 
     # ── Active Learning: 정정 데이터 반영 (데이터 쌓이면 활성화) ──
     # corr_df = collect_corrections()
@@ -1513,7 +1543,16 @@ def main():
     pill_df = full_df[full_df['label'] != NEGATIVE_LABEL].reset_index(drop=True)
     neg_only_df = full_df[full_df['label'] == NEGATIVE_LABEL].reset_index(drop=True)
 
-    pill_train, pill_val = train_test_split(pill_df, test_size=0.1, random_state=42)
+    # 이미지 1장뿐인 클래스(식약처 단일 이미지)는 val로 빼면 학습/레퍼런스에서 사라짐
+    # → 무조건 오답 처리되어 R@1 왜곡. 1장짜리는 전부 train으로, 2장 이상만 10% val 분리.
+    label_counts = pill_df['label'].value_counts()
+    single_labels = set(label_counts[label_counts < 2].index)
+    single_df = pill_df[pill_df['label'].isin(single_labels)].reset_index(drop=True)
+    multi_df  = pill_df[~pill_df['label'].isin(single_labels)].reset_index(drop=True)
+    print(f'  📋 1장 클래스 {len(single_labels):,}종 → 전부 train | 2장+ 클래스 {multi_df["label"].nunique():,}종 → 10% val 분리')
+
+    multi_train, pill_val = train_test_split(multi_df, test_size=0.1, random_state=42)
+    pill_train = pd.concat([single_df, multi_train], ignore_index=True)
     neg_train, neg_val = train_test_split(neg_only_df, test_size=0.1, random_state=42)
 
     train_df = pd.concat([pill_train, neg_train], ignore_index=True)
@@ -1526,7 +1565,7 @@ def main():
     ref_df = train_df.groupby('label').first().reset_index()
     ref_dataset = PillDataset(ref_df, val_transform)
 
-    nw = 0 if DEVICE.type == 'mps' else 4
+    nw = 0 if DEVICE.type == 'mps' else 4  # MPS는 멀티프로세스 불안정 → 싱글
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,  num_workers=nw, pin_memory=False)
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=nw, pin_memory=False)
     ref_loader   = DataLoader(ref_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=nw, pin_memory=False)
@@ -1575,13 +1614,13 @@ def main():
     no_improve = 0
 
     print(f'\n🚀 학습 시작! (총 {EPOCHS} epoch)')
-    print(f'  증강: 배경합성 + 카메라시뮬 + CutMix')
+    print(f'  증강: 기본 augmentation + CutMix (배경합성/카메라시뮬 OFF)')
     print('-' * 60)
 
     for epoch in range(1, EPOCHS + 1):
         t0 = time.time()
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, optimizer, criterion, use_cutmix=True
+            model, train_loader, optimizer, criterion, scheduler=scheduler, use_cutmix=True
         )
         elapsed = time.time() - t0
 
