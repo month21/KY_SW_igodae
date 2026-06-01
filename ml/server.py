@@ -261,8 +261,21 @@ def inference_multi():
 
         masks = sam_generator.generate(img_np)
 
+        # ── 작업B: 약 모양 기하 필터 — 배경·그림자·뒷면 띠 같은 비(非)약 조각 제거 ──
         total_area = img_np.shape[0] * img_np.shape[1]
-        masks = [m for m in masks if m['area'] < total_area * 0.8 and m['area'] > total_area * 0.02]
+        def _pill_like(m):
+            a = m['area']
+            bx, by, bw, bh = m['bbox']
+            if not (total_area * 0.02 < a < total_area * 0.80):
+                return False              # 너무 작거나(부스러기) 너무 큼(전체 배경)
+            if bw < 8 or bh < 8:
+                return False
+            if max(bw, bh) / min(bw, bh) > 3.5:
+                return False              # 지나치게 길쭉 = 약 아님(배경 띠/모서리)
+            if a < bw * bh * 0.45:
+                return False              # bbox 대비 채움률 낮음 = 불규칙(그림자/배경)
+            return True
+        masks = [m for m in masks if _pill_like(m)]
         masks = sorted(masks, key=lambda x: x['area'], reverse=True)
 
         # 겹치는 마스크 제거 (IoU > 50%면 큰 쪽만 남김)
