@@ -3050,21 +3050,31 @@ export default function App() {
           results.push(r)
         }
       }
+      // ── 메인 결과(약 이름+식약처 정보) 즉시 표시 ──
       setPillResults(results); setAnalysisResult(results[0])
-      // 작업5: 단일 약은 종합분석(Groq 왕복) 스킵 — 2개 이상일 때만 상호작용 분석
-      const combined = results.length >= 2 ? await analyzePillsCombined(results, symptom) : null
-      setCombinedAnalysis(combined)
-      const userProfile = {
-        isPregnant: userConditions.includes('임신') || userConditions.includes('임부'),
-        isElderly:  userConditions.includes('노인') || userConditions.includes('고령'),
-      }
-      const dur = await runDurCheck(results, userProfile)
-      setDurWarnings(dur)
-      if (results[0]?.statusCode !== 'unidentified') {
-        await saveToFirestore(results[0], blob)  // blob 전달 → Base64 압축 후 Firestore 저장
-      }
-    } catch (e) { console.warn('분석 실패:', e.message) }
-    finally { setMfdsLoading(false) }
+      setMfdsLoading(false)
+
+      // ── 종합분석·DUR·저장은 백그라운드 (결과 표시를 막지 않음) ──
+      ;(async () => {
+        try {
+          if (results.length >= 2) {
+            setCombinedAnalysis(await analyzePillsCombined(results, symptom))
+          }
+          const userProfile = {
+            isPregnant: userConditions.includes('임신') || userConditions.includes('임부'),
+            isElderly:  userConditions.includes('노인') || userConditions.includes('고령'),
+          }
+          const dur = await runDurCheck(results, userProfile)
+          setDurWarnings(dur)
+          if (results[0]?.statusCode !== 'unidentified') {
+            await saveToFirestore(results[0], blob)
+          }
+        } catch (e) { console.warn('백그라운드 분석 실패:', e.message) }
+      })()
+    } catch (e) {
+      console.warn('분석 실패:', e.message)
+      setMfdsLoading(false)
+    }
   }, [userConditions, symptom, saveToFirestore])
 
   const handleCameraCapture = useCallback(async (blob) => {
