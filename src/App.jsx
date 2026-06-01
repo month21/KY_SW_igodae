@@ -46,7 +46,8 @@ const GROQ_VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct'
 // Groq API는 CORS 미지원 → 서버리스 프록시 경유 (키도 서버 환경변수로만 보관)
 const GROQ_PROXY = '/api/groq-proxy'
 // DL 모델 추론 서버 (학습 완료 후 ml/server.py 실행 시 활성화)
-const MODEL_PROXY = '/api/model-inference'
+// 프로덕션(Vercel)에선 VITE_MODEL_PROXY_URL(ngrok 주소)로 직접 호출, 없으면 dev 프록시
+const MODEL_PROXY = import.meta.env.VITE_MODEL_PROXY_URL || '/api/model-inference'
 
 // ─── 식약처 API 엔드포인트 (Vercel 프록시 경유) ───────────────────────────────
 const MFDS_PROXY = '/api/mfds-proxy'
@@ -319,7 +320,7 @@ async function fetchModelInference(base64WithPrefix) {
     console.log('🔬 DL 모델 호출 시작...')
     const res = await fetch(MODEL_PROXY, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify({ image: base64WithPrefix }),
     })
     console.log(`🔬 DL 모델 응답: ${res.status}`)
@@ -340,7 +341,7 @@ async function fetchMultiPillInference(base64WithPrefix) {
     console.log('🔬 멀티약 SAM 분석 시작...')
     const res = await fetch(`${MODEL_PROXY}/multi`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify({ image: base64WithPrefix }),
     })
     if (!res.ok) return null
