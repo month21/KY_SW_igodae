@@ -2730,7 +2730,7 @@ useEffect(() => {
                   onClick={() => onPillModeChange?.('multi')}
                   className={`flex-1 py-2.5 rounded-xl text-sm font-bold transition-all ${pillMode === 'multi' ? 'bg-white text-[#0192F5] shadow' : 'text-slate-500'}`}
                 >
-                  💊💊 여러 약 <span className="text-[10px] font-medium opacity-70">(베타)</span>
+                  💊💊 여러 약
                 </button>
               </div>
               <div className="flex gap-3">
@@ -2741,6 +2741,9 @@ useEffect(() => {
                   <Camera size={22} /> {pillMode === 'multi' ? '여러 약 촬영' : '약 촬영하기'}
                 </button>
               </div>
+              <p className="text-center text-xs text-slate-400 leading-relaxed">
+                💡 <b className="text-slate-500">밝은 곳</b>에서 약을 <b className="text-slate-500">화면에 크게</b>, <b className="text-slate-500">단순한 배경</b>(흰 종이·어두운 바닥) 위에 놓고 찍으면 정확해요
+              </p>
             </div>
           )}
           <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
