@@ -50,6 +50,11 @@ ood_config = None
 transform = None
 DEVICE = None
 sam_generator = None
+MATCH_MASK = None   # 매칭 가능 레퍼런스 마스크 (네거티브·조합코드 제외)
+
+# 멀티약(SAM) 튜닝
+SINGLE_SKIP_CONF = 0.70   # 전체 이미지가 이 이상으로 매칭되면 단일 약 → SAM 스킵 (속도↑, 2면 오분할 방지)
+MULTI_MIN_CONF   = 0.50   # SAM 분할 조각은 이 이상만 약으로 인정 (뒷면·텍스트 쓰레기 조각 제거)
 
 def load_model():
     global model, ref_embeddings, ref_names, ood_config, transform, DEVICE
@@ -64,7 +69,7 @@ def load_model():
     print(f'🔧 디바이스: {DEVICE}')
 
     # 체크포인트 로드
-    ckpt_path = OUTPUT_DIR / 'best_model_v1226.pth'
+    ckpt_path = OUTPUT_DIR / 'best_model.pth'
     if not ckpt_path.exists():
         print(f'❌ 모델 파일 없음: {ckpt_path}')
         print('   train.py로 학습을 먼저 완료하세요.')
@@ -88,6 +93,15 @@ def load_model():
     with open(str(OUTPUT_DIR / 'ref_names.json'), 'r', encoding='utf-8') as f:
         ref_names = json.load(f)
     print(f'✅ 레퍼런스 DB: {len(ref_names)}개 약품')
+
+    # 매칭 가능 마스크 미리 계산: 네거티브 + 조합(K-코드) 제외
+    # 조합 클래스("K-000250-000573-...")는 약 이름이 아니라 코드 → 사용자에게 쓸모없음
+    global MATCH_MASK
+    import re as _re
+    neg = '__NOT_A_PILL__'
+    combo_re = _re.compile(r'^K-\d+-\d+')
+    MATCH_MASK = np.array([(n != neg) and (combo_re.match(str(n)) is None) for n in ref_names])
+    print(f'✅ 매칭 대상: {int(MATCH_MASK.sum())}종 (조합·네거티브 {len(ref_names)-int(MATCH_MASK.sum())}개 제외)')
 
     # OOD 설정
     ood_path = OUTPUT_DIR / 'ood_config.json'
@@ -178,9 +192,8 @@ def analyze_single_crop(img):
 
     sims = np.dot(ref_embeddings, query.T).flatten()
     neg_label = ood_config.get('negative_label', '__NOT_A_PILL__')
-    pill_mask = np.array([n != neg_label for n in ref_names])
     sims_pill = sims.copy()
-    sims_pill[~pill_mask] = -1
+    sims_pill[~MATCH_MASK] = -1   # 네거티브 + 조합(K-코드) 제외 → 쓸모없는 코드/비약 매칭 방지
 
     top1_sim = float(sims_pill.max())
     top5_idxs = np.argsort(sims_pill)[::-1][:5]
@@ -192,7 +205,7 @@ def analyze_single_crop(img):
     results = []
     for idx in top5_idxs:
         name = ref_names[idx]
-        if name == neg_label:
+        if not MATCH_MASK[idx]:
             continue
         results.append({
             'drugName': name,
@@ -228,6 +241,23 @@ def inference_multi():
         img_bytes = base64.b64decode(img_b64)
         img = Image.open(BytesIO(img_bytes)).convert('RGB')
         img_np = np.array(img)
+
+        # ── 작업4: 단일 약 빠른 판정 — 전체 이미지 1회 추론. 명확히 1개면 SAM 스킵 ──
+        # (SAM 십수 초 절약 + 식약처 2면 이미지 오분할/쓰레기 조각 차단)
+        whole = analyze_single_crop(img)
+        if whole and whole['confidence'] >= SINGLE_SKIP_CONF:
+            return jsonify({
+                'success': True,
+                'mode': 'single_fast',
+                'segmentsFound': 1,
+                'pillsIdentified': 1,
+                'results': [{
+                    'index': 0,
+                    'bbox': [0, 0, int(img_np.shape[1]), int(img_np.shape[0])],
+                    'confidence': whole['confidence'],
+                    'pills': whole['pills'],
+                }],
+            })
 
         masks = sam_generator.generate(img_np)
 
@@ -267,7 +297,8 @@ def inference_multi():
             crop = img.crop((x1, y1, x2, y2))
 
             result = analyze_single_crop(crop)
-            if result is None:
+            # 작업6: 저신뢰 조각(뒷면·텍스트 등 쓰레기) 제거 — 멀티 인정 기준 상향
+            if result is None or result['confidence'] < MULTI_MIN_CONF:
                 continue
 
             pill_results.append({
