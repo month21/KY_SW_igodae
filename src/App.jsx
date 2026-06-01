@@ -2942,67 +2942,74 @@ export default function App() {
     let aiResult
     const imageDataUrl = `data:${mimeType};base64,${base64}`
 
-    // ── 1단계: SAM 멀티약 시도 → 단일 DL → Groq 순서 ──
-    const multiResult = await fetchMultiPillInference(imageDataUrl)
+    // ── 1단계: 단일 약 우선 (빠름·SAM 없음) → 약 아님/실패 시에만 SAM 멀티 시도 ──
+    const dlResult = await fetchModelInference(imageDataUrl)
 
-    if (multiResult && multiResult.pillsIdentified >= 1) {
-      console.log(`🔬 SAM: ${multiResult.pillsIdentified}개 약 감지`)
-      const rawPills = multiResult.results.map(r => {
-        const top = r.pills[0]
-        const conf = r.confidence
-        const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
-        return {
-          drugName: top.drugName,
+    if (dlResult?.isPill && dlResult.pills?.length > 0) {
+      const conf = dlResult.confidence
+      const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
+      console.log(`🧠 DL 단일 매칭 (유사도 ${(conf * 100).toFixed(1)}%, 확신도 ${confLabel})`)
+      const topPill = dlResult.pills[0]
+      aiResult = {
+        pills: [{
+          drugName: topPill.drugName,
           color: '', shape: '', form: '', imprint: '', size: '',
-          confidence: top.similarity,
-          description: `SAM+DL 매칭 (유사도 ${(top.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
+          confidence: topPill.similarity,
+          description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
           fromDL: true,
-          bbox: r.bbox,
-        }
-      })
-      // 같은 약 이름 중복 제거 — 가장 높은 유사도만 남김
-      const isSameDrug = (a, b) => {
-        const na = a.replace(/\s|\(.*\)/g, ''), nb = b.replace(/\s|\(.*\)/g, '')
-        if (na === nb) return true
-        const short = Math.min(na.length, nb.length, 4)
-        return na.slice(0, short) === nb.slice(0, short)
-      }
-      const deduped = []
-      for (const p of rawPills) {
-        const existing = deduped.find(d => isSameDrug(d.drugName, p.drugName))
-        if (existing) {
-          if (p.confidence > existing.confidence) Object.assign(existing, p)
-        } else {
-          deduped.push({ ...p })
-        }
-      }
-      console.log(`🔬 중복 제거: ${rawPills.length}개 → ${deduped.length}개`)
-      const multiPills = deduped
-      if (multiPills.length >= 2) {
-        aiResult = {
-          pills: multiPills,
-          totalCount: multiPills.length,
-          symptomHint: '',
-          dlConfidenceLevel: multiPills[0].confidence >= 0.75 ? '높음' : '보통',
-          multiMode: true,
-        }
-      } else {
-        // 중복 제거 후 1종류면 단일약 모드로 전환
-        const p = multiPills[0]
-        const confLabel = p.confidence >= 0.75 ? '높음' : p.confidence >= 0.45 ? '보통' : '낮음'
-        console.log(`🧠 SAM 중복 제거 → 단일약 모드: ${p.drugName}`)
-        aiResult = {
-          pills: [p],
-          totalCount: 1,
-          symptomHint: '',
-          dlConfidenceLevel: confLabel,
-        }
+        }],
+        totalCount: 1,
+        symptomHint: '',
+        dlConfidenceLevel: confLabel,
       }
     } else {
-      const dlResult = await fetchModelInference(imageDataUrl)
-
-      // 작업1: DL이 "약 아님" 판정 → Groq Vision 재확인 없이 즉시 표시 (속도↑)
-      if (dlResult && !dlResult.isPill) {
+      // 단일이 약 아님/실패 → 여러 약일 수 있으니 SAM 멀티 시도
+      const multiResult = await fetchMultiPillInference(imageDataUrl)
+      if (multiResult && multiResult.pillsIdentified >= 1) {
+        console.log(`🔬 SAM: ${multiResult.pillsIdentified}개 약 감지`)
+        const rawPills = multiResult.results.map(r => {
+          const top = r.pills[0]
+          const conf = r.confidence
+          const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
+          return {
+            drugName: top.drugName,
+            color: '', shape: '', form: '', imprint: '', size: '',
+            confidence: top.similarity,
+            description: `SAM+DL 매칭 (유사도 ${(top.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
+            fromDL: true,
+            bbox: r.bbox,
+          }
+        })
+        const isSameDrug = (a, b) => {
+          const na = a.replace(/\s|\(.*\)/g, ''), nb = b.replace(/\s|\(.*\)/g, '')
+          if (na === nb) return true
+          const short = Math.min(na.length, nb.length, 4)
+          return na.slice(0, short) === nb.slice(0, short)
+        }
+        const deduped = []
+        for (const p of rawPills) {
+          const existing = deduped.find(d => isSameDrug(d.drugName, p.drugName))
+          if (existing) {
+            if (p.confidence > existing.confidence) Object.assign(existing, p)
+          } else {
+            deduped.push({ ...p })
+          }
+        }
+        const multiPills = deduped
+        if (multiPills.length >= 2) {
+          aiResult = {
+            pills: multiPills,
+            totalCount: multiPills.length,
+            symptomHint: '',
+            dlConfidenceLevel: multiPills[0].confidence >= 0.75 ? '높음' : '보통',
+            multiMode: true,
+          }
+        } else {
+          const p = multiPills[0]
+          const confLabel = p.confidence >= 0.75 ? '높음' : p.confidence >= 0.45 ? '보통' : '낮음'
+          aiResult = { pills: [p], totalCount: 1, symptomHint: '', dlConfidenceLevel: confLabel }
+        }
+      } else if (dlResult && !dlResult.isPill) {
         setAnalysisResult({
           statusCode: 'unidentified',
           summary: '약이 아닙니다',
@@ -3011,27 +3018,7 @@ export default function App() {
         })
         setAnalyzing(false)
         return
-      }
-
-      if (dlResult?.isPill && dlResult.pills?.length > 0) {
-        const conf = dlResult.confidence
-        const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
-        console.log(`🧠 DL 모델 매칭 (유사도: ${(conf * 100).toFixed(1)}%, 확신도: ${confLabel})`)
-        const topPill = dlResult.pills[0]
-        aiResult = {
-          pills: [{
-            drugName: topPill.drugName,
-            color: '', shape: '', form: '', imprint: '', size: '',
-            confidence: topPill.similarity,
-            description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
-            fromDL: true,
-          }],
-          totalCount: 1,
-          symptomHint: '',
-          dlConfidenceLevel: confLabel,
-        }
       } else {
-        // 작업1: DL 미연결/실패 → Groq 단독(한국약 지식 없음) 대신 재촬영 안내
         setAnalysisResult({
           statusCode: 'unidentified',
           summary: '분석 실패',
