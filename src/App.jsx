@@ -2514,7 +2514,7 @@ function CameraView({ onCapture, onCancel }) {
 }
 
 // ─── 홈 뷰 ───────────────────────────────────────────────────────────────────
-function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combinedAnalysis, durWarnings, analyzing, mfdsLoading, onCameraCapture, onGalleryUpload, onChat, onHistory, onRetry, previewUrl, logCount, symptom, onSymptomChange, onLogoTap, onCorrection, capturedImageBase64, currentUser, isGuest, userRole, onLogout, onLoginRequest, onAdmin }) {
+function HomeView({ userConditions, analysisResult, mfdsInfo, pillResults, combinedAnalysis, durWarnings, analyzing, mfdsLoading, onCameraCapture, onGalleryUpload, onChat, onHistory, onRetry, previewUrl, logCount, symptom, onSymptomChange, onLogoTap, pillMode, onPillModeChange, onCorrection, capturedImageBase64, currentUser, isGuest, userRole, onLogout, onLoginRequest, onAdmin }) {
   const [selectedPillIdx, setSelectedPillIdx] = useState(0)
   const fileInputRef = useRef(null)
   const [step, setStep] = useState(previewUrl || analysisResult ? 2 : 1)
@@ -2717,13 +2717,30 @@ useEffect(() => {
               )}
             </div>
           ) : (
-            <div className="flex gap-3">
-              <button onClick={() => fileInputRef.current?.click()} className="flex-1 py-4 rounded-2xl bg-slate-100 text-slate-600 font-bold flex items-center justify-center gap-2">
-                <ImagePlus size={20} /> 갤러리
-              </button>
-              <button onClick={onCameraCapture} className="flex-[2] py-4 rounded-2xl bg-gradient-to-r from-[#0192F5] to-[#40BEFD] text-white font-bold text-base flex items-center justify-center gap-2 shadow-lg shadow-blue-200 active:scale-95 transition-all">
-                <Camera size={22} /> 약 촬영하기
-              </button>
+            <div className="space-y-3">
+              {/* 인식 모드 선택 — 단일약(빠르고 정확) / 여러약(SAM 분리, 베타) */}
+              <div className="flex gap-2 p-1 bg-slate-100 rounded-2xl">
+                <button
+                  onClick={() => onPillModeChange?.('single')}
+                  className={`flex-1 py-2.5 rounded-xl text-sm font-bold transition-all ${pillMode !== 'multi' ? 'bg-white text-[#0192F5] shadow' : 'text-slate-500'}`}
+                >
+                  💊 단일약
+                </button>
+                <button
+                  onClick={() => onPillModeChange?.('multi')}
+                  className={`flex-1 py-2.5 rounded-xl text-sm font-bold transition-all ${pillMode === 'multi' ? 'bg-white text-[#0192F5] shadow' : 'text-slate-500'}`}
+                >
+                  💊💊 여러 약 <span className="text-[10px] font-medium opacity-70">(베타)</span>
+                </button>
+              </div>
+              <div className="flex gap-3">
+                <button onClick={() => fileInputRef.current?.click()} className="flex-1 py-4 rounded-2xl bg-slate-100 text-slate-600 font-bold flex items-center justify-center gap-2">
+                  <ImagePlus size={20} /> 갤러리
+                </button>
+                <button onClick={onCameraCapture} className="flex-[2] py-4 rounded-2xl bg-gradient-to-r from-[#0192F5] to-[#40BEFD] text-white font-bold text-base flex items-center justify-center gap-2 shadow-lg shadow-blue-200 active:scale-95 transition-all">
+                  <Camera size={22} /> {pillMode === 'multi' ? '여러 약 촬영' : '약 촬영하기'}
+                </button>
+              </div>
             </div>
           )}
           <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
@@ -2763,6 +2780,7 @@ export default function App() {
   const [authReady, setAuthReady]           = useState(false)
   const [isGuest, setIsGuest]               = useState(false)
   const [symptom, setSymptom]               = useState('')
+  const [pillMode, setPillMode]             = useState('single')  // 'single' | 'multi'
   const [showOnboarding, setShowOnboarding] = useState(!localStorage.getItem('igodae_onboarding_done'))
   const [capturedImageBase64, setCapturedImageBase64] = useState(null)
   const logoTapTimer = useRef(null)
@@ -2934,7 +2952,7 @@ export default function App() {
     })
   }, [])
 
-  const runAnalysis = useCallback(async (base64, mimeType = 'image/jpeg', blob = null) => {
+  const runAnalysis = useCallback(async (base64, mimeType = 'image/jpeg', blob = null, mode = 'single') => {
     setAnalyzing(true)
     setMfdsInfo(null); setAnalysisResult(null); setPillResults([]); setDurWarnings([])
     setCapturedImageBase64(base64)
@@ -2942,28 +2960,9 @@ export default function App() {
     let aiResult
     const imageDataUrl = `data:${mimeType};base64,${base64}`
 
-    // ── 1단계: 단일 약 우선 (빠름·SAM 없음) → 약 아님/실패 시에만 SAM 멀티 시도 ──
-    const dlResult = await fetchModelInference(imageDataUrl)
-
-    if (dlResult?.isPill && dlResult.pills?.length > 0) {
-      const conf = dlResult.confidence
-      const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
-      console.log(`🧠 DL 단일 매칭 (유사도 ${(conf * 100).toFixed(1)}%, 확신도 ${confLabel})`)
-      const topPill = dlResult.pills[0]
-      aiResult = {
-        pills: [{
-          drugName: topPill.drugName,
-          color: '', shape: '', form: '', imprint: '', size: '',
-          confidence: topPill.similarity,
-          description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
-          fromDL: true,
-        }],
-        totalCount: 1,
-        symptomHint: '',
-        dlConfidenceLevel: confLabel,
-      }
-    } else {
-      // 단일이 약 아님/실패 → 여러 약일 수 있으니 SAM 멀티 시도
+    // ── 인식: 모드별 분기 ──
+    //  single = 단일 추론만(SAM 절대 안 탐, 빠름·정확) / multi = SAM으로 여러 약 분리
+    if (mode === 'multi') {
       const multiResult = await fetchMultiPillInference(imageDataUrl)
       if (multiResult && multiResult.pillsIdentified >= 1) {
         console.log(`🔬 SAM: ${multiResult.pillsIdentified}개 약 감지`)
@@ -3008,6 +3007,36 @@ export default function App() {
           const p = multiPills[0]
           const confLabel = p.confidence >= 0.75 ? '높음' : p.confidence >= 0.45 ? '보통' : '낮음'
           aiResult = { pills: [p], totalCount: 1, symptomHint: '', dlConfidenceLevel: confLabel }
+        }
+      } else {
+        setAnalysisResult({
+          statusCode: 'unidentified',
+          summary: '약 미인식',
+          description: '여러 약이 잘 보이게 다시 촬영하거나, 단일약 모드로 한 알씩 찍어보세요.',
+          confidence: 0,
+        })
+        setAnalyzing(false)
+        return
+      }
+    } else {
+      // 단일약 모드: SAM 안 탐, 단일 추론만
+      const dlResult = await fetchModelInference(imageDataUrl)
+      if (dlResult?.isPill && dlResult.pills?.length > 0) {
+        const conf = dlResult.confidence
+        const confLabel = conf >= 0.75 ? '높음' : conf >= 0.45 ? '보통' : '낮음'
+        console.log(`🧠 DL 단일 매칭 (유사도 ${(conf * 100).toFixed(1)}%, 확신도 ${confLabel})`)
+        const topPill = dlResult.pills[0]
+        aiResult = {
+          pills: [{
+            drugName: topPill.drugName,
+            color: '', shape: '', form: '', imprint: '', size: '',
+            confidence: topPill.similarity,
+            description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
+            fromDL: true,
+          }],
+          totalCount: 1,
+          symptomHint: '',
+          dlConfidenceLevel: confLabel,
         }
       } else if (dlResult && !dlResult.isPill) {
         setAnalysisResult({
@@ -3081,14 +3110,14 @@ export default function App() {
     setView('home')
     const { base64, previewUrl } = await processImage(blob)
     setPreviewUrl(previewUrl); setAnalysisResult(null)
-    await runAnalysis(base64, 'image/jpeg', blob)
-  }, [processImage, runAnalysis])
+    await runAnalysis(base64, 'image/jpeg', blob, pillMode)
+  }, [processImage, runAnalysis, pillMode])
 
   const handleGalleryUpload = useCallback(async (file) => {
     const { base64, previewUrl } = await processImage(file)
     setPreviewUrl(previewUrl); setAnalysisResult(null)
-    await runAnalysis(base64, file.type || 'image/jpeg', file)
-  }, [processImage, runAnalysis])
+    await runAnalysis(base64, file.type || 'image/jpeg', file, pillMode)
+  }, [processImage, runAnalysis, pillMode])
 
 
 
@@ -3187,6 +3216,7 @@ export default function App() {
         onRetry={() => { setPreviewUrl(null); setAnalysisResult(null); setMfdsInfo(null); setPillResults([]); setCombinedAnalysis(null); setDurWarnings([]) }}
         previewUrl={previewUrl} logCount={analysisLogs.length}
         symptom={symptom} onSymptomChange={setSymptom} onLogoTap={handleLogoTap}
+        pillMode={pillMode} onPillModeChange={setPillMode}
         onCorrection={saveCorrection} capturedImageBase64={capturedImageBase64}
         /* 새로 추가된 props */
         currentUser={currentUser} isGuest={isGuest} userRole={userRole}
