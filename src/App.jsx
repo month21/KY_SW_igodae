@@ -2686,10 +2686,10 @@ useEffect(() => {
               <p className="text-sm text-slate-400 leading-relaxed">약 봉투, 약통, 낱알 모두 가능해요<br />AI + 식약처 DB로 정확하게 분석해드려요</p>
             </div>
             <div className="mt-6 space-y-2 text-left">
-              {[['💊', '약 이름이 보이게 찍으면 더 정확해요'], ['📋', '처방전이나 약 봉투도 인식 가능해요'], ['🔍', '흐리지 않게 가까이서 촬영해주세요'], ['🏥', 'AI 분석 후 식약처 DB에서 공식 정보도 확인해요']].map(([emoji, text], i) => (
-                <div key={i} className="flex items-center gap-2.5 bg-slate-50 rounded-2xl px-4 py-2.5">
+              {[['💊', '약 이름(각인)이 보이게 찍으면 더 정확해요', true], ['📋', '처방전이나 약 봉투도 인식 가능해요', false], ['🔍', '흐리지 않게 가까이서 촬영해주세요', false], ['🏥', 'AI 분석 후 식약처 DB에서 공식 정보도 확인해요', false]].map(([emoji, text, hot], i) => (
+                <div key={i} className={`flex items-center gap-2.5 rounded-2xl px-4 py-2.5 ${hot ? 'bg-blue-50 border border-[#0192F5]/30' : 'bg-slate-50'}`}>
                   <span className="text-lg">{emoji}</span>
-                  <p className="text-xs text-slate-500">{text}</p>
+                  <p className={`text-xs ${hot ? 'text-[#0192F5] font-bold' : 'text-slate-500'}`}>{text}</p>
                 </div>
               ))}
             </div>
@@ -2741,9 +2741,6 @@ useEffect(() => {
                   <Camera size={22} /> {pillMode === 'multi' ? '여러 약 촬영' : '약 촬영하기'}
                 </button>
               </div>
-              <p className="text-center text-xs text-slate-400 leading-relaxed">
-                💡 <b className="text-slate-500">밝은 곳</b>에서 약을 <b className="text-slate-500">화면에 크게</b>, <b className="text-slate-500">단순한 배경</b>(흰 종이·어두운 바닥) 위에 놓고 찍으면 정확해요
-              </p>
             </div>
           )}
           <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
