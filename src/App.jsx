@@ -381,6 +381,17 @@ async function summarizeMfdsText(label, text) {
   }
 }
 
+// ─── 타임아웃 fetch (식약처/DUR API가 죽어도 앱이 멈추지 않게) ────────────────
+async function fetchWithTimeout(url, opts = {}, ms = 6000) {
+  const ctrl = new AbortController()
+  const id = setTimeout(() => ctrl.abort(), ms)
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal })
+  } finally {
+    clearTimeout(id)
+  }
+}
+
 // ─── 식약처 API: 의약품 개요정보 조회 ────────────────────────────────────────
 async function fetchMfdsInfo(drugName) {
   if (!drugName) return null
@@ -398,7 +409,7 @@ async function fetchMfdsInfo(drugName) {
   })
   const trySearch = async (name) => {
     const params = new URLSearchParams({ itemName: name, numOfRows: '3', pageNo: '1' })
-    const res = await fetch(`${MFDS_DRUG_INFO_URL}&${params}`)
+    const res = await fetchWithTimeout(`${MFDS_DRUG_INFO_URL}&${params}`)
     const data = await res.json()
     const items = data?.body?.items
     if (!items || items.length === 0) return null
@@ -430,7 +441,7 @@ async function fetchPillByName(drugName) {
   if (!drugName) return null
   const trySearch = async (name) => {
     const params = new URLSearchParams({ itemName: name, numOfRows: '5', pageNo: '1' })
-    const res = await fetch(`${MFDS_PILL_INFO_URL}&${params}`)
+    const res = await fetchWithTimeout(`${MFDS_PILL_INFO_URL}&${params}`)
     const data = await res.json()
     const items = data?.body?.items
     if (!items || items.length === 0) return null
@@ -456,7 +467,7 @@ async function fetchPillByFeature({ color, shape, imprint, form }) {
     if (shape) params.append('chart', shape)
     if (imprint) params.append('markKorEng', imprint)
     if (form) params.append('formCodeName', form)
-    const res = await fetch(`${MFDS_PILL_INFO_URL}&${params}`)
+    const res = await fetchWithTimeout(`${MFDS_PILL_INFO_URL}&${params}`)
     const data = await res.json()
     const items = data?.body?.items
     if (!items || items.length === 0) return null
@@ -502,7 +513,7 @@ async function fetchDrugPermission(drugName) {
   }
   const trySearch = async (name) => {
     const params = new URLSearchParams({ item_name: name, numOfRows: '3', pageNo: '1' })
-    const res = await fetch(`${MFDS_PRMISN_URL}&${params}`)
+    const res = await fetchWithTimeout(`${MFDS_PRMISN_URL}&${params}`)
     if (!res.ok) return null
     const data = await res.json()
     const raw = data?.body?.items
@@ -544,7 +555,7 @@ async function fetchDurApi(endpoint, drugName) {
       numOfRows: '5',
       pageNo: '1',
     })
-    const res = await fetch(`${endpoint}&${params}`)
+    const res = await fetchWithTimeout(`${endpoint}&${params}`)
     if (!res.ok) return []
     const data = await res.json()
     const raw = data?.body?.items
