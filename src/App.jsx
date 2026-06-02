@@ -2772,13 +2772,19 @@ useEffect(() => {
                 </button>
               </div>
               <div className="flex gap-3">
-                <button onClick={() => fileInputRef.current?.click()} className="flex-1 py-4 rounded-2xl bg-slate-100 text-slate-600 font-bold flex items-center justify-center gap-2">
-                  <ImagePlus size={20} /> 갤러리
-                </button>
-                <button onClick={onCameraCapture} className="flex-[2] py-4 rounded-2xl bg-gradient-to-r from-[#0192F5] to-[#40BEFD] text-white font-bold text-base flex items-center justify-center gap-2 shadow-lg shadow-blue-200 active:scale-95 transition-all">
-                  <Camera size={22} /> {pillMode === 'multi' ? '여러 약 촬영' : '약 촬영하기'}
+                {/* 여러약은 '한 알씩 촬영' 방식 → 갤러리(YOLO 경로) 숨김 */}
+                {pillMode !== 'multi' && (
+                  <button onClick={() => fileInputRef.current?.click()} className="flex-1 py-4 rounded-2xl bg-slate-100 text-slate-600 font-bold flex items-center justify-center gap-2">
+                    <ImagePlus size={20} /> 갤러리
+                  </button>
+                )}
+                <button onClick={onCameraCapture} className={`${pillMode === 'multi' ? 'flex-1' : 'flex-[2]'} py-4 rounded-2xl bg-gradient-to-r from-[#0192F5] to-[#40BEFD] text-white font-bold text-base flex items-center justify-center gap-2 shadow-lg shadow-blue-200 active:scale-95 transition-all`}>
+                  <Camera size={22} /> {pillMode === 'multi' ? '약 하나씩 촬영' : '약 촬영하기'}
                 </button>
               </div>
+              {pillMode === 'multi' && (
+                <p className="text-center text-xs text-slate-400">여러 약은 <b className="text-slate-500">한 알씩 촬영</b>해서 담아주세요 (갤러리 미지원)</p>
+              )}
             </div>
           )}
           <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
