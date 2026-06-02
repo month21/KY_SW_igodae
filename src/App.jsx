@@ -2480,11 +2480,14 @@ function CameraView({ onCapture, onCancel, mode = 'single', capturedCount = 0, l
     if (!videoRef.current || !ready || busy) return
     const v = videoRef.current
     const canvas = document.createElement('canvas')
-    // 줌 배율만큼 중앙 크롭 (비율 유지 — 정사각형 크롭은 약을 잘라먹어서 금지)
-    const sw = v.videoWidth / zoom, sh = v.videoHeight / zoom
-    const sx = (v.videoWidth - sw) / 2, sy = (v.videoHeight - sh) / 2
-    canvas.width = sw; canvas.height = sh
-    canvas.getContext('2d').drawImage(v, sx, sy, sw, sh, 0, 0, sw, sh)
+    // 화면 가이드 네모칸(240px)에 해당하는 비디오 영역만 크롭 → "박스 꽉 채움 = 캡처 꽉 참"
+    // object-cover 스케일 + CSS 줌 반영해서 박스→비디오 좌표 변환
+    const rect = v.getBoundingClientRect()
+    const scale = Math.max(rect.width / v.videoWidth, rect.height / v.videoHeight) || 1
+    const crop = Math.min(240 / (zoom * scale), v.videoWidth, v.videoHeight)
+    const sx = (v.videoWidth - crop) / 2, sy = (v.videoHeight - crop) / 2
+    canvas.width = crop; canvas.height = crop
+    canvas.getContext('2d').drawImage(v, sx, sy, crop, crop, 0, 0, crop, crop)
     canvas.toBlob(blob => {
       if (mode !== 'multi') stop()   // 단일 모드만 즉시 종료, 여러약은 카메라 유지
       onCapture(blob)
