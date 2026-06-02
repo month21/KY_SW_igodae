@@ -3173,12 +3173,20 @@ export default function App() {
       const { base64, previewUrl } = await processImage(blob)
       const dl = await fetchModelInference(`data:image/jpeg;base64,${base64}`)
       const top = (dl?.isPill && dl.pills?.length > 0) ? dl.pills[0] : null
+      // 색/모양 조회 (사용자가 자기 약과 대조용) — 약 이름은 몰라도 색·모양은 확인 가능
+      let color = '', shape = ''
+      if (top) {
+        try {
+          const pd = await fetchPillByName(top.drugName)
+          if (pd) { color = (pd.COLOR_CLASS1 || pd.colorClass1 || '').trim(); shape = (pd.DRUG_SHAPE || pd.drugShape || '').trim() }
+        } catch {}
+      }
       // 찍은 약마다 무조건 1개 추가 (중복 제거 안 함 — 사용자가 확인화면에서 직접 삭제)
       setMultiCaptured(prev => [...prev, {
         drugName: top ? top.drugName : '(인식 실패 — 다시 촬영 권장)',
         similarity: top ? top.similarity : 0,
         thumb: previewUrl,            // 찍은 사진 썸네일 → 확인화면에서 눈으로 대조
-        ok: !!top,
+        ok: !!top, color, shape,
       }])
     } catch (e) { console.warn('멀티 캡처 인식 실패:', e.message) }
     finally { setMultiBusy(false) }
@@ -3292,7 +3300,7 @@ export default function App() {
       onCapture={pillMode === 'multi' ? handleMultiCapture : handleCameraCapture}
       onCancel={() => { setView('home'); setMultiCaptured([]) }}
       capturedCount={multiCaptured.length}
-      lastCaptured={multiCaptured[multiCaptured.length - 1]?.drugName || ''}
+      lastCaptured={(() => { const l = multiCaptured[multiCaptured.length - 1]; return l ? `${l.color || ''} ${l.shape || ''}`.trim() || '담음' : '' })()}
       busy={multiBusy}
       onDone={() => { setView('home'); setMultiConfirm(true) }}
     />
@@ -3349,8 +3357,10 @@ export default function App() {
                       ? <img src={c.thumb} alt="" className="w-12 h-12 rounded-xl object-cover shrink-0 border border-slate-200" />
                       : <span className="w-12 h-12 rounded-xl bg-slate-200 flex items-center justify-center text-slate-400 shrink-0">💊</span>}
                     <div className="flex-1 min-w-0">
-                      <p className={`text-sm font-bold truncate ${c.ok ? 'text-slate-700' : 'text-red-400'}`}>{c.drugName}</p>
-                      <p className="text-[11px] text-slate-400">{c.ok ? '내가 찍은 사진과 같은 약인지 확인하세요' : '다시 촬영을 권장해요'}</p>
+                      <p className={`text-sm font-bold truncate ${c.ok ? 'text-slate-700' : 'text-red-400'}`}>
+                        {c.ok ? ((c.color || c.shape) ? `${c.color} ${c.shape} 알약`.trim() : '약으로 인식됨') : '인식 실패'}
+                      </p>
+                      <p className="text-[11px] text-slate-400">{c.ok ? '내 약이랑 색·모양이 같나요? 다르면 ✕로 빼세요' : '다시 촬영을 권장해요'}</p>
                     </div>
                     <button onClick={() => removeMultiPill(i)} className="text-slate-300 hover:text-red-400 shrink-0"><X size={18} /></button>
                   </div>
