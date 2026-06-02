@@ -51,6 +51,7 @@ transform = None
 DEVICE = None
 sam_generator = None
 yolo_model = None   # YOLO 약 탐지 (SAM 대체 — 여러 약 위치 박스)
+ocr_reader = None   # EasyOCR — 알약 각인(글자/숫자) 읽기 (보조 식별)
 MATCH_MASK = None   # 매칭 가능 레퍼런스 마스크 (네거티브·조합코드 제외)
 
 # 멀티약(SAM) 튜닝
@@ -156,6 +157,43 @@ def load_model():
     else:
         print('ℹ️ YOLO 가중치 없음 — SAM 폴백')
 
+    # EasyOCR 로드 (알약 각인 읽기 — 보조 식별)
+    global ocr_reader
+    try:
+        import easyocr
+        ocr_reader = easyocr.Reader(['en'], gpu=False)   # 각인은 영문/숫자, CPU로 안정
+        print('✅ EasyOCR 로드 완료 (각인 읽기)')
+    except Exception as e:
+        print(f'⚠️ EasyOCR 로드 실패: {e}')
+        ocr_reader = None
+
+
+import re as _re_ocr
+_OCR_NOISE = {'druginfo', 'drug', 'info', 'mg', 'mm'}
+
+def read_imprint(img):
+    """알약 각인(글자/숫자) 추출 — 배경 워터마크 노이즈 필터. 실패 시 빈 문자열."""
+    if ocr_reader is None:
+        return ''
+    try:
+        import numpy as _np
+        toks = ocr_reader.readtext(_np.array(img), detail=0)
+        cands = []
+        for t in toks:
+            s = _re_ocr.sub(r'[^A-Za-z0-9]', '', str(t)).strip()
+            if not (2 <= len(s) <= 10):
+                continue
+            if s.lower() in _OCR_NOISE:
+                continue
+            if _re_ocr.fullmatch(r'\d{3,}', s):   # 긴 숫자(워터마크 코드) 제외
+                continue
+            cands.append(s)
+        # 글자 포함 토큰 우선, 길이순
+        cands.sort(key=lambda s: (any(c.isalpha() for c in s), len(s)), reverse=True)
+        return cands[0] if cands else ''
+    except Exception:
+        return ''
+
 
 @app.route('/api/model-inference', methods=['POST', 'OPTIONS'])
 def inference():
@@ -176,6 +214,7 @@ def inference():
 
         result = analyze_single_crop(img)
         threshold = ood_config.get('threshold', 0.45)
+        imprint = read_imprint(img)   # 각인(보조 식별 + 사용자 확인용)
 
         if result is None:
             return jsonify({
@@ -183,6 +222,7 @@ def inference():
                 'isPill': False,
                 'confidence': 0.0,
                 'threshold': threshold,
+                'imprint': imprint,
                 'message': '약으로 인식할 수 없습니다',
                 'pills': [],
             })
@@ -192,6 +232,7 @@ def inference():
             'isPill': True,
             'confidence': result['confidence'],
             'threshold': threshold,
+            'imprint': imprint,
             'pills': result['pills'],
         })
 
