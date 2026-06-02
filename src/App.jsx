@@ -2480,11 +2480,11 @@ function CameraView({ onCapture, onCancel, mode = 'single', capturedCount = 0, l
     if (!videoRef.current || !ready || busy) return
     const v = videoRef.current
     const canvas = document.createElement('canvas')
-    // 디지털 줌: 중앙을 zoom 배율로 크롭해서 캡처
-    const sw = v.videoWidth / zoom, sh = v.videoHeight / zoom
-    const sx = (v.videoWidth - sw) / 2, sy = (v.videoHeight - sh) / 2
-    canvas.width = sw; canvas.height = sh
-    canvas.getContext('2d').drawImage(v, sx, sy, sw, sh, 0, 0, sw, sh)
+    // 화면의 가이드 네모칸(중앙 정사각형)만 크롭해서 캡처 → 약이 꽉 차게 (줌 반영)
+    const side = Math.min(v.videoWidth, v.videoHeight) / zoom
+    const sx = (v.videoWidth - side) / 2, sy = (v.videoHeight - side) / 2
+    canvas.width = side; canvas.height = side
+    canvas.getContext('2d').drawImage(v, sx, sy, side, side, 0, 0, side, side)
     canvas.toBlob(blob => {
       if (mode !== 'multi') stop()   // 단일 모드만 즉시 종료, 여러약은 카메라 유지
       onCapture(blob)
@@ -2504,6 +2504,7 @@ function CameraView({ onCapture, onCancel, mode = 'single', capturedCount = 0, l
               <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black/60 text-white text-xs px-3 py-1 rounded-full whitespace-nowrap">
                 {mode === 'multi' ? '약 1개씩 이 안에 크게 맞춰주세요' : '약품이 이 안에 들어오게 맞춰주세요'}
               </div>
+              <div className="absolute -bottom-9 left-1/2 -translate-x-1/2 bg-[#0192F5]/85 text-white text-[11px] font-bold px-3 py-1 rounded-full whitespace-nowrap">💊 각인(글자·숫자)이 보이면 더 정확해요</div>
             </div>
           </div>
         )}
@@ -3174,25 +3175,26 @@ export default function App() {
     setMultiBusy(true)
     try {
       const { base64, previewUrl } = await processImage(blob)
-      const dl = await fetchModelInference(`data:image/jpeg;base64,${base64}`)
+      const dl = await fetchModelInference(`data:image/jpeg;base64,${base64}`)  // DL만 (빠름)
       const top = (dl?.isPill && dl.pills?.length > 0) ? dl.pills[0] : null
-      // 색/모양 조회 (사용자가 자기 약과 대조용) — 약 이름은 몰라도 색·모양은 확인 가능
-      let color = '', shape = ''
-      if (top) {
-        try {
-          const pd = await fetchPillByName(top.drugName)
-          if (pd) { color = (pd.COLOR_CLASS1 || pd.colorClass1 || '').trim(); shape = (pd.DRUG_SHAPE || pd.drugShape || '').trim() }
-        } catch {}
-      }
-      // 찍은 약마다 무조건 1개 추가 (중복 제거 안 함 — 사용자가 확인화면에서 직접 삭제)
+      const id = Date.now() + Math.random()
       setMultiCaptured(prev => [...prev, {
+        id,
         drugName: top ? top.drugName : '(인식 실패 — 다시 촬영 권장)',
         similarity: top ? top.similarity : 0,
-        thumb: previewUrl,            // 찍은 사진 썸네일 → 확인화면에서 눈으로 대조
-        ok: !!top, color, shape,
+        thumb: previewUrl, ok: !!top, color: '', shape: '',
       }])
-    } catch (e) { console.warn('멀티 캡처 인식 실패:', e.message) }
-    finally { setMultiBusy(false) }
+      setMultiBusy(false)   // DL 끝나면 즉시 다음 촬영 가능 (색/모양은 백그라운드로)
+      // 색/모양은 백그라운드 조회 후 해당 항목만 갱신 (촬영 속도 막지 않음)
+      if (top) {
+        fetchPillByName(top.drugName).then(pd => {
+          if (!pd) return
+          const color = (pd.COLOR_CLASS1 || pd.colorClass1 || '').trim()
+          const shape = (pd.DRUG_SHAPE || pd.drugShape || '').trim()
+          if (color || shape) setMultiCaptured(prev => prev.map(e => e.id === id ? { ...e, color, shape } : e))
+        }).catch(() => {})
+      }
+    } catch (e) { console.warn('멀티 캡처 인식 실패:', e.message); setMultiBusy(false) }
   }, [processImage])
 
   const handleMultiDone = useCallback(() => { setMultiConfirm(true) }, [])
