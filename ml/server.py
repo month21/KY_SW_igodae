@@ -50,6 +50,7 @@ ood_config = None
 transform = None
 DEVICE = None
 sam_generator = None
+yolo_model = None   # YOLO 약 탐지 (SAM 대체 — 여러 약 위치 박스)
 MATCH_MASK = None   # 매칭 가능 레퍼런스 마스크 (네거티브·조합코드 제외)
 
 # 멀티약(SAM) 튜닝
@@ -141,6 +142,20 @@ def load_model():
     else:
         print('ℹ️ MobileSAM 가중치 없음 — 단일 약 모드만 사용')
 
+    # YOLO 약 탐지 로드 (SAM 대체 — 여러 약 위치 박스)
+    global yolo_model
+    yolo_path = OUTPUT_DIR / 'yolo_pill' / 'weights' / 'best.pt'
+    if yolo_path.exists():
+        try:
+            from ultralytics import YOLO
+            yolo_model = YOLO(str(yolo_path))
+            print('✅ YOLO 약 탐지 로드 완료 (멀티약 = YOLO 박스 → ArcFace)')
+        except Exception as e:
+            print(f'⚠️ YOLO 로드 실패: {e}')
+            yolo_model = None
+    else:
+        print('ℹ️ YOLO 가중치 없음 — SAM 폴백')
+
 
 @app.route('/api/model-inference', methods=['POST', 'OPTIONS'])
 def inference():
@@ -222,12 +237,12 @@ def analyze_single_crop(img):
 
 @app.route('/api/model-inference/multi', methods=['POST', 'OPTIONS'])
 def inference_multi():
-    """여러 약 동시 인식 — SAM으로 분리 후 각각 ArcFace 매칭"""
+    """여러 약 동시 인식 — YOLO로 약 박스 탐지 후 각 박스 ArcFace 매칭 (SAM 대체)"""
     if request.method == 'OPTIONS':
         return '', 200
 
-    if sam_generator is None:
-        return jsonify({'error': 'MobileSAM이 로드되지 않았습니다'}), 503
+    if yolo_model is None:
+        return jsonify({'error': 'YOLO 탐지 모델이 로드되지 않았습니다'}), 503
 
     try:
         data = request.get_json()
@@ -241,90 +256,44 @@ def inference_multi():
         img_bytes = base64.b64decode(img_b64)
         img = Image.open(BytesIO(img_bytes)).convert('RGB')
         img_np = np.array(img)
+        H, W = img_np.shape[:2]
 
-        # ── 작업4: 단일 약 빠른 판정 — 전체 이미지 1회 추론. 명확히 1개면 SAM 스킵 ──
-        # (SAM 십수 초 절약 + 식약처 2면 이미지 오분할/쓰레기 조각 차단)
-        whole = analyze_single_crop(img)
-        if whole and whole['confidence'] >= SINGLE_SKIP_CONF:
-            return jsonify({
-                'success': True,
-                'mode': 'single_fast',
-                'segmentsFound': 1,
-                'pillsIdentified': 1,
-                'results': [{
-                    'index': 0,
-                    'bbox': [0, 0, int(img_np.shape[1]), int(img_np.shape[0])],
-                    'confidence': whole['confidence'],
-                    'pills': whole['pills'],
-                }],
-            })
+        # ── YOLO로 약 위치 박스 탐지 ──
+        boxes = []
+        try:
+            yres = yolo_model.predict(img_np, conf=0.35, iou=0.5, verbose=False, device='cpu')
+            if yres and len(yres[0].boxes) > 0:
+                boxes = yres[0].boxes.xyxy.cpu().numpy().tolist()
+        except Exception as e:
+            print(f'⚠️ YOLO 탐지 오류: {e}')
 
-        masks = sam_generator.generate(img_np)
-
-        # ── 작업B: 약 모양 기하 필터 — 배경·그림자·뒷면 띠 같은 비(非)약 조각 제거 ──
-        total_area = img_np.shape[0] * img_np.shape[1]
-        def _pill_like(m):
-            a = m['area']
-            bx, by, bw, bh = m['bbox']
-            if not (total_area * 0.02 < a < total_area * 0.80):
-                return False              # 너무 작거나(부스러기) 너무 큼(전체 배경)
-            if bw < 8 or bh < 8:
-                return False
-            if max(bw, bh) / min(bw, bh) > 3.5:
-                return False              # 지나치게 길쭉 = 약 아님(배경 띠/모서리)
-            if a < bw * bh * 0.45:
-                return False              # bbox 대비 채움률 낮음 = 불규칙(그림자/배경)
-            return True
-        masks = [m for m in masks if _pill_like(m)]
-        masks = sorted(masks, key=lambda x: x['area'], reverse=True)
-
-        # 겹치는 마스크 제거 (IoU > 50%면 큰 쪽만 남김)
-        filtered = []
-        for m in masks:
-            bx, by, bw, bh = m['bbox']
-            keep = True
-            for f in filtered:
-                fx, fy, fw, fh = f['bbox']
-                ix1, iy1 = max(bx, fx), max(by, fy)
-                ix2, iy2 = min(bx+bw, fx+fw), min(by+bh, fy+fh)
-                inter = max(0, ix2-ix1) * max(0, iy2-iy1)
-                union = bw*bh + fw*fh - inter
-                if union > 0 and inter / union > 0.5:
-                    keep = False
-                    break
-            if keep:
-                filtered.append(m)
-        masks = filtered[:6]
+        # 못 찾으면 전체 이미지를 1개 박스로 (단일 약 폴백)
+        if not boxes:
+            boxes = [[0, 0, W, H]]
 
         pill_results = []
-        for i, mask_data in enumerate(masks):
-            bbox = mask_data['bbox']  # [x, y, w, h]
-            x, y, w, h = [int(v) for v in bbox]
-
-            pad = int(max(w, h) * 0.1)
-            x1 = max(0, x - pad)
-            y1 = max(0, y - pad)
-            x2 = min(img_np.shape[1], x + w + pad)
-            y2 = min(img_np.shape[0], y + h + pad)
-
-            crop = img.crop((x1, y1, x2, y2))
+        for i, box in enumerate(boxes[:8]):
+            x1, y1, x2, y2 = [int(v) for v in box[:4]]
+            pad = int(max(x2 - x1, y2 - y1) * 0.08)
+            cx1 = max(0, x1 - pad); cy1 = max(0, y1 - pad)
+            cx2 = min(W, x2 + pad); cy2 = min(H, y2 + pad)
+            crop = img.crop((cx1, cy1, cx2, cy2))
 
             result = analyze_single_crop(crop)
-            # 작업6: 저신뢰 조각(뒷면·텍스트 등 쓰레기) 제거 — 멀티 인정 기준 상향
             if result is None or result['confidence'] < MULTI_MIN_CONF:
                 continue
 
             pill_results.append({
                 'index': i,
-                'bbox': [x1, y1, x2, y2],
+                'bbox': [cx1, cy1, cx2, cy2],
                 'confidence': result['confidence'],
                 'pills': result['pills'],
             })
 
         return jsonify({
             'success': True,
-            'mode': 'multi',
-            'segmentsFound': len(masks),
+            'mode': 'yolo_multi',
+            'segmentsFound': len(boxes),
             'pillsIdentified': len(pill_results),
             'results': pill_results,
         })

@@ -19,6 +19,12 @@ def main():
         device='mps',
         patience=6,           # 6에폭 개선 없으면 조기 종료
         workers=4,
+        # ── 약 탐지 특화 증강: 약은 방향이 없음 → 회전·상하/좌우 반전 강화 ──
+        degrees=180,          # 모든 회전 각도 (약은 어느 방향이든 같음)
+        flipud=0.5,           # 상하 반전 (기본 0 → 0.5)
+        fliplr=0.5,           # 좌우 반전
+        hsv_v=0.5,            # 밝기 변화 강화 (조명 다양성 → 실사진 robust)
+        scale=0.5,            # 크기 변화 (가까이/멀리)
         project=str(ML / 'output'),
         name='yolo_pill',
         exist_ok=True,
