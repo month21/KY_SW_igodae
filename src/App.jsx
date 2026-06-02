@@ -2710,7 +2710,7 @@ useEffect(() => {
             <MessageCircle size={18} /> AI 약사에게 더 물어보기
           </button>
         )}
-        {!previewUrl && !analyzing && !analysisResult && (
+        {!previewUrl && !analyzing && !mfdsLoading && !analysisResult && pillResults.length === 0 && (
           <div className="text-center py-8 space-y-4">
             <div className="w-24 h-24 rounded-full bg-blue-50 flex items-center justify-center mx-auto">
               <Camera size={40} className="text-[#40BEFD]" />
@@ -3170,16 +3170,16 @@ export default function App() {
   const handleMultiCapture = useCallback(async (blob) => {
     setMultiBusy(true)
     try {
-      const { base64 } = await processImage(blob)
+      const { base64, previewUrl } = await processImage(blob)
       const dl = await fetchModelInference(`data:image/jpeg;base64,${base64}`)
-      if (dl?.isPill && dl.pills?.length > 0) {
-        const top = dl.pills[0]
-        setMultiCaptured(prev => {
-          const key = n => (n || '').replace(/\s|\(.*\)/g, '').slice(0, 4)
-          if (prev.some(p => key(p.drugName) === key(top.drugName))) return prev  // 같은 약 중복 방지
-          return [...prev, { drugName: top.drugName, similarity: top.similarity }]
-        })
-      }
+      const top = (dl?.isPill && dl.pills?.length > 0) ? dl.pills[0] : null
+      // 찍은 약마다 무조건 1개 추가 (중복 제거 안 함 — 사용자가 확인화면에서 직접 삭제)
+      setMultiCaptured(prev => [...prev, {
+        drugName: top ? top.drugName : '(인식 실패 — 다시 촬영 권장)',
+        similarity: top ? top.similarity : 0,
+        thumb: previewUrl,            // 찍은 사진 썸네일 → 확인화면에서 눈으로 대조
+        ok: !!top,
+      }])
     } catch (e) { console.warn('멀티 캡처 인식 실패:', e.message) }
     finally { setMultiBusy(false) }
   }, [processImage])
@@ -3194,9 +3194,11 @@ export default function App() {
     setMultiConfirm(false); setView('home')
     if (multiCaptured.length === 0) return
     setAnalysisResult(null); setPillResults([]); setCombinedAnalysis(null); setDurWarnings([])
+    const valid = multiCaptured.filter(c => c.ok)
+    if (valid.length === 0) { setMultiCaptured([]); return }
     setMfdsLoading(true)
     try {
-      const results = await Promise.all(multiCaptured.map(c =>
+      const results = await Promise.all(valid.map(c =>
         analyzeSinglePill({ drugName: c.drugName, fromDL: true, confidence: c.similarity }, '')
       ))
       setPillResults(results); setAnalysisResult(results[0])
@@ -3342,11 +3344,13 @@ export default function App() {
             ) : (
               <div className="space-y-2">
                 {multiCaptured.map((c, i) => (
-                  <div key={i} className="flex items-center gap-3 bg-slate-50 rounded-2xl px-4 py-3">
-                    <span className="w-6 h-6 rounded-full bg-[#0192F5] text-white text-xs font-bold flex items-center justify-center shrink-0">{i + 1}</span>
+                  <div key={i} className="flex items-center gap-3 bg-slate-50 rounded-2xl px-3 py-2.5">
+                    {c.thumb
+                      ? <img src={c.thumb} alt="" className="w-12 h-12 rounded-xl object-cover shrink-0 border border-slate-200" />
+                      : <span className="w-12 h-12 rounded-xl bg-slate-200 flex items-center justify-center text-slate-400 shrink-0">💊</span>}
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-bold text-slate-700 truncate">{c.drugName}</p>
-                      <p className="text-[11px] text-slate-400">유사도 {(c.similarity * 100).toFixed(0)}%</p>
+                      <p className={`text-sm font-bold truncate ${c.ok ? 'text-slate-700' : 'text-red-400'}`}>{c.drugName}</p>
+                      <p className="text-[11px] text-slate-400">{c.ok ? '내가 찍은 사진과 같은 약인지 확인하세요' : '다시 촬영을 권장해요'}</p>
                     </div>
                     <button onClick={() => removeMultiPill(i)} className="text-slate-300 hover:text-red-400 shrink-0"><X size={18} /></button>
                   </div>
