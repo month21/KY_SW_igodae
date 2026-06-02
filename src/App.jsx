@@ -2458,7 +2458,7 @@ function CameraView({ onCapture, onCancel, mode = 'single', capturedCount = 0, l
   const streamRef = useRef(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState(null)
-  const [zoom, setZoom] = useState(1)   // 디지털 줌 1x~3x
+  const [zoom, setZoom] = useState(1.6)   // 디지털 줌 (기본 1.6x — 약이 작게 잡히면 인식 안 돼서 기본 확대)
 
   useEffect(() => {
     let mounted = true
@@ -2501,8 +2501,8 @@ function CameraView({ onCapture, onCancel, mode = 'single', capturedCount = 0, l
         {ready && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="w-60 h-60 rounded-3xl border-2 border-white/70 relative">
-              <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black/60 text-white text-xs px-3 py-1 rounded-full whitespace-nowrap">
-                {mode === 'multi' ? '약 1개씩 이 안에 크게 맞춰주세요' : '약품이 이 안에 들어오게 맞춰주세요'}
+              <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black/70 text-white text-xs font-bold px-3 py-1 rounded-full whitespace-nowrap">
+                ⚠️ 약을 네모칸에 꽉 차게! (작으면 인식 안 돼요)
               </div>
               <div className="absolute -bottom-9 left-1/2 -translate-x-1/2 bg-[#0192F5]/85 text-white text-[11px] font-bold px-3 py-1 rounded-full whitespace-nowrap">💊 각인(글자·숫자)이 보이면 더 정확해요</div>
             </div>
