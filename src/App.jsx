@@ -777,8 +777,11 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
       if (pillData) matchSource = 'imprint'
     }
 
-    // 3단계: 색상/모양으로 fallback
-    if (!pillData) {
+    // 3단계: 색상/모양으로 fallback — 특징이 하나라도 있을 때만
+    // (DL 결과는 색/모양/각인이 비어있어 빈 검색하면 식약처가 엉뚱한 약(페라트라 등) 반환 → 차단)
+    const hasFeature = [pillFeature.color, pillFeature.shape, pillFeature.imprint, pillFeature.form]
+      .some(v => (v || '').trim().length > 0)
+    if (!pillData && hasFeature) {
       pillData = await fetchPillByFeature({
         color: pillFeature.color,
         shape: pillFeature.shape,
@@ -3207,7 +3210,7 @@ export default function App() {
     setMfdsLoading(true)
     try {
       const results = await Promise.all(valid.map(c =>
-        analyzeSinglePill({ drugName: c.drugName, fromDL: true, confidence: c.similarity }, '')
+        analyzeSinglePill({ drugName: c.drugName, fromDL: true, confidence: c.similarity, color: c.color || '', shape: c.shape || '' }, '')
       ))
       setPillResults(results); setAnalysisResult(results[0])
       setMfdsLoading(false)
