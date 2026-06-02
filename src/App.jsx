@@ -2840,7 +2840,10 @@ export default function App() {
   // ── Auth 상태 구독 ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!auth) { setAuthReady(true); return }
+    // 카톡 등 인앱 브라우저에서 Firebase 인증이 안 뜨면 무한로딩 → 3.5초 후 게스트로 강제 진행
+    const fallback = setTimeout(() => setAuthReady(true), 3500)
     const unsub = onAuthStateChanged(auth, async (user) => {
+      clearTimeout(fallback)
       if (user) {
         setCurrentUser(user)
         setIsGuest(false)
@@ -2862,7 +2865,7 @@ export default function App() {
       }
       setAuthReady(true)
     })
-    return unsub
+    return () => { clearTimeout(fallback); unsub() }
   }, [])
 
   // ── 관리자 계정 자동 생성 + 자동 로그인 (.env에 VITE_ADMIN_EMAIL 있을 때만) ──
