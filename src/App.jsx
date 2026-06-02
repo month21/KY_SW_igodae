@@ -857,7 +857,7 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
       description: efcySummary || '',
       className: className || '',
       isPrescription,
-      visualDescription: `${pillFeature.color}색 ${pillFeature.shape} 알약이에요.`,
+      visualDescription: `${pillFeature.color ? pillFeature.color + '색 ' : ''}${pillFeature.shape ? pillFeature.shape + ' ' : ''}알약${pillFeature.imprint ? ` · 각인 "${pillFeature.imprint}"` : ''}`,
       warnings: atpnSummary || '복용 전 약사에게 확인하세요.',
       sideEffects: sideEffects || '',
       dosageGuide: useSummary || '-',
@@ -3089,7 +3089,7 @@ export default function App() {
         aiResult = {
           pills: [{
             drugName: topPill.drugName,
-            color: '', shape: '', form: '', imprint: '', size: '',
+            color: '', shape: '', form: '', imprint: dlResult.imprint || '', size: '',
             confidence: topPill.similarity,
             description: `DL 모델 매칭 (유사도 ${(topPill.similarity * 100).toFixed(1)}%, 확신도 ${confLabel})`,
             fromDL: true,

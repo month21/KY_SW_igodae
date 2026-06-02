@@ -21,7 +21,7 @@ from tqdm import tqdm
 ML = Path(__file__).parent
 OUT = ML / 'output'
 DEVICE = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
-REFS_PER_DRUG = 3
+REFS_PER_DRUG = 6   # 약당 AI Hub 각도 수 (다중 임베딩 강화 — 많을수록 일반화↑)
 
 
 class PillModel(nn.Module):
