@@ -2450,11 +2450,12 @@ function OnboardingSlides({ onComplete }) {
 }
 
 // ─── 카메라 뷰 ────────────────────────────────────────────────────────────────
-function CameraView({ onCapture, onCancel }) {
+function CameraView({ onCapture, onCancel, mode = 'single', capturedCount = 0, lastCaptured = '', busy = false, onDone }) {
   const videoRef = useRef(null)
   const streamRef = useRef(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState(null)
+  const [zoom, setZoom] = useState(1)   // 디지털 줌 1x~3x
 
   useEffect(() => {
     let mounted = true
@@ -2470,24 +2471,43 @@ function CameraView({ onCapture, onCancel }) {
     return () => { mounted = false; streamRef.current?.getTracks().forEach(t => t.stop()) }
   }, [])
 
+  const stop = () => streamRef.current?.getTracks().forEach(t => t.stop())
+
   const shoot = () => {
-    if (!videoRef.current || !ready) return
+    if (!videoRef.current || !ready || busy) return
+    const v = videoRef.current
     const canvas = document.createElement('canvas')
-    canvas.width = videoRef.current.videoWidth
-    canvas.height = videoRef.current.videoHeight
-    canvas.getContext('2d').drawImage(videoRef.current, 0, 0)
-    canvas.toBlob(blob => { streamRef.current?.getTracks().forEach(t => t.stop()); onCapture(blob) }, 'image/jpeg', 0.92)
+    // 디지털 줌: 중앙을 zoom 배율로 크롭해서 캡처
+    const sw = v.videoWidth / zoom, sh = v.videoHeight / zoom
+    const sx = (v.videoWidth - sw) / 2, sy = (v.videoHeight - sh) / 2
+    canvas.width = sw; canvas.height = sh
+    canvas.getContext('2d').drawImage(v, sx, sy, sw, sh, 0, 0, sw, sh)
+    canvas.toBlob(blob => {
+      if (mode !== 'multi') stop()   // 단일 모드만 즉시 종료, 여러약은 카메라 유지
+      onCapture(blob)
+    }, 'image/jpeg', 0.92)
   }
+
+  const handleCancel = () => { stop(); onCancel() }
+  const handleDone = () => { stop(); onDone?.() }
 
   return (
     <div className="fixed inset-0 bg-black z-50 flex flex-col">
       <div className="relative flex-1 overflow-hidden">
-        <video ref={videoRef} playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+        <video ref={videoRef} playsInline muted className="absolute inset-0 w-full h-full object-cover origin-center transition-transform" style={{ transform: `scale(${zoom})` }} />
         {ready && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="w-72 h-48 rounded-3xl border-2 border-white/60 relative">
-              <div className="absolute -top-6 left-1/2 -translate-x-1/2 bg-black/60 text-white text-xs px-3 py-1 rounded-full whitespace-nowrap">약품이 이 안에 들어오게 맞춰주세요</div>
+            <div className="w-60 h-60 rounded-3xl border-2 border-white/70 relative">
+              <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black/60 text-white text-xs px-3 py-1 rounded-full whitespace-nowrap">
+                {mode === 'multi' ? '약 1개씩 이 안에 크게 맞춰주세요' : '약품이 이 안에 들어오게 맞춰주세요'}
+              </div>
             </div>
+          </div>
+        )}
+        {/* 여러약 모드: 담은 개수 뱃지 */}
+        {mode === 'multi' && ready && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-[#0192F5] text-white text-sm font-bold px-4 py-1.5 rounded-full shadow-lg">
+            💊 {capturedCount}개 담음{busy ? ' · 인식 중…' : lastCaptured ? ` · 방금: ${lastCaptured.slice(0, 12)}` : ''}
           </div>
         )}
         {!ready && !error && <div className="absolute inset-0 flex items-center justify-center"><Loader2 size={40} className="text-white animate-spin" /></div>}
@@ -2495,17 +2515,31 @@ function CameraView({ onCapture, onCancel }) {
           <div className="absolute inset-0 flex flex-col items-center justify-center px-8 text-center space-y-4">
             <XCircle size={48} className="text-red-400" />
             <p className="text-white text-sm">{error}</p>
-            <button onClick={onCancel} className="px-6 py-2 bg-white text-slate-800 rounded-full font-semibold">돌아가기</button>
+            <button onClick={handleCancel} className="px-6 py-2 bg-white text-slate-800 rounded-full font-semibold">돌아가기</button>
           </div>
         )}
-        <button onClick={onCancel} className="absolute top-4 left-4 w-10 h-10 rounded-full bg-black/50 flex items-center justify-center">
+        <button onClick={handleCancel} className="absolute top-4 left-4 w-10 h-10 rounded-full bg-black/50 flex items-center justify-center">
           <X size={20} className="text-white" />
         </button>
+        {/* 줌 슬라이더 */}
+        {ready && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/50 px-4 py-2 rounded-full">
+            <span className="text-white text-xs">🔍</span>
+            <input type="range" min="1" max="3" step="0.1" value={zoom} onChange={e => setZoom(parseFloat(e.target.value))} className="w-40 accent-[#0192F5]" />
+            <span className="text-white text-xs w-8">{zoom.toFixed(1)}x</span>
+          </div>
+        )}
       </div>
       {ready && (
-        <div className="bg-black pb-12 pt-6 flex items-center justify-center">
-          <button onClick={shoot} className="w-20 h-20 rounded-full border-4 border-white bg-white/20 flex items-center justify-center active:scale-90 transition-transform">
-            <div className="w-14 h-14 rounded-full bg-white" />
+        <div className="bg-black pb-10 pt-5 flex items-center justify-center gap-6">
+          {/* 여러약: 촬영 완료 버튼 */}
+          {mode === 'multi' && (
+            <button onClick={handleDone} disabled={capturedCount === 0} className={`absolute right-6 px-5 py-3 rounded-2xl font-bold text-sm ${capturedCount > 0 ? 'bg-white text-slate-800' : 'bg-white/30 text-white/50'}`}>
+              촬영 완료 ▸
+            </button>
+          )}
+          <button onClick={shoot} disabled={busy} className="w-20 h-20 rounded-full border-4 border-white bg-white/20 flex items-center justify-center active:scale-90 transition-transform disabled:opacity-50">
+            {busy ? <Loader2 size={28} className="text-white animate-spin" /> : <div className="w-14 h-14 rounded-full bg-white" />}
           </button>
         </div>
       )}
@@ -2785,6 +2819,9 @@ export default function App() {
   const [isGuest, setIsGuest]               = useState(false)
   const [symptom, setSymptom]               = useState('')
   const [pillMode, setPillMode]             = useState('single')  // 'single' | 'multi'
+  const [multiCaptured, setMultiCaptured]   = useState([])        // 여러약: 한 장씩 누적 (DL 결과)
+  const [multiBusy, setMultiBusy]           = useState(false)     // 촬영 직후 인식 중
+  const [multiConfirm, setMultiConfirm]     = useState(false)     // "N개 맞습니까?" 확인 화면
   const [showOnboarding, setShowOnboarding] = useState(!localStorage.getItem('igodae_onboarding_done'))
   const [capturedImageBase64, setCapturedImageBase64] = useState(null)
   const logoTapTimer = useRef(null)
@@ -3123,6 +3160,55 @@ export default function App() {
     await runAnalysis(base64, file.type || 'image/jpeg', file, pillMode)
   }, [processImage, runAnalysis, pillMode])
 
+  // ── 여러약 = 한 장씩 촬영 누적 ──
+  const handleMultiCapture = useCallback(async (blob) => {
+    setMultiBusy(true)
+    try {
+      const { base64 } = await processImage(blob)
+      const dl = await fetchModelInference(`data:image/jpeg;base64,${base64}`)
+      if (dl?.isPill && dl.pills?.length > 0) {
+        const top = dl.pills[0]
+        setMultiCaptured(prev => {
+          const key = n => (n || '').replace(/\s|\(.*\)/g, '').slice(0, 4)
+          if (prev.some(p => key(p.drugName) === key(top.drugName))) return prev  // 같은 약 중복 방지
+          return [...prev, { drugName: top.drugName, similarity: top.similarity }]
+        })
+      }
+    } catch (e) { console.warn('멀티 캡처 인식 실패:', e.message) }
+    finally { setMultiBusy(false) }
+  }, [processImage])
+
+  const handleMultiDone = useCallback(() => { setMultiConfirm(true) }, [])
+
+  const removeMultiPill = useCallback((idx) => {
+    setMultiCaptured(prev => prev.filter((_, i) => i !== idx))
+  }, [])
+
+  const handleMultiConfirm = useCallback(async () => {
+    setMultiConfirm(false); setView('home')
+    if (multiCaptured.length === 0) return
+    setAnalysisResult(null); setPillResults([]); setCombinedAnalysis(null); setDurWarnings([])
+    setMfdsLoading(true)
+    try {
+      const results = await Promise.all(multiCaptured.map(c =>
+        analyzeSinglePill({ drugName: c.drugName, fromDL: true, confidence: c.similarity }, '')
+      ))
+      setPillResults(results); setAnalysisResult(results[0])
+      setMfdsLoading(false)
+      ;(async () => {
+        try {
+          if (results.length >= 2) setCombinedAnalysis(await analyzePillsCombined(results, symptom))
+          const userProfile = {
+            isPregnant: userConditions.includes('임신') || userConditions.includes('임부'),
+            isElderly:  userConditions.includes('노인') || userConditions.includes('고령'),
+          }
+          setDurWarnings(await runDurCheck(results, userProfile))
+        } catch (e) { console.warn('백그라운드 분석 실패:', e.message) }
+      })()
+    } catch (e) { console.warn('여러약 분석 실패:', e.message); setMfdsLoading(false) }
+    setMultiCaptured([])
+  }, [multiCaptured, symptom, userConditions])
+
 
 
 
@@ -3192,7 +3278,17 @@ export default function App() {
       />
     )
   }
-  if (view === 'camera') return <CameraView onCapture={handleCameraCapture} onCancel={() => setView('home')} />
+  if (view === 'camera') return (
+    <CameraView
+      mode={pillMode}
+      onCapture={pillMode === 'multi' ? handleMultiCapture : handleCameraCapture}
+      onCancel={() => { setView('home'); setMultiCaptured([]) }}
+      capturedCount={multiCaptured.length}
+      lastCaptured={multiCaptured[multiCaptured.length - 1]?.drugName || ''}
+      busy={multiBusy}
+      onDone={() => { setView('home'); setMultiConfirm(true) }}
+    />
+  )
   if (view === 'chat' && analysisResult) return <ChatView result={analysisResult} mfdsInfo={mfdsInfo} userConditions={userConditions} onBack={() => setView('home')} />
   if (view === 'history') return (
     <HistoryView
@@ -3215,7 +3311,7 @@ export default function App() {
         userConditions={userConditions} analysisResult={analysisResult} mfdsInfo={mfdsInfo}
         pillResults={pillResults} combinedAnalysis={combinedAnalysis} durWarnings={durWarnings}
         analyzing={analyzing} mfdsLoading={mfdsLoading}
-        onCameraCapture={() => setView('camera')} onGalleryUpload={handleGalleryUpload}
+        onCameraCapture={() => { if (pillMode === 'multi') { setMultiCaptured([]); setMultiConfirm(false) } setView('camera') }} onGalleryUpload={handleGalleryUpload}
         onChat={() => setView('chat')} onHistory={() => setView('history')}
         onRetry={() => { setPreviewUrl(null); setAnalysisResult(null); setMfdsInfo(null); setPillResults([]); setCombinedAnalysis(null); setDurWarnings([]) }}
         previewUrl={previewUrl} logCount={analysisLogs.length}
@@ -3227,6 +3323,37 @@ export default function App() {
         onLogout={handleLogout} onLoginRequest={() => { setIsGuest(false) }}
         onAdmin={() => setView('admin')}
       />
+      {/* 여러약 — "N개 인식, 맞습니까?" 최종 확인 */}
+      {multiConfirm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="bg-white rounded-3xl w-full max-w-md p-5 space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="text-center">
+              <p className="text-lg font-extrabold text-slate-800">약 {multiCaptured.length}개를 인식했어요</p>
+              <p className="text-sm text-slate-400 mt-0.5">맞는지 확인하고 분석을 시작하세요</p>
+            </div>
+            {multiCaptured.length === 0 ? (
+              <p className="text-center text-sm text-slate-400 py-6">담은 약이 없어요. 다시 촬영해주세요.</p>
+            ) : (
+              <div className="space-y-2">
+                {multiCaptured.map((c, i) => (
+                  <div key={i} className="flex items-center gap-3 bg-slate-50 rounded-2xl px-4 py-3">
+                    <span className="w-6 h-6 rounded-full bg-[#0192F5] text-white text-xs font-bold flex items-center justify-center shrink-0">{i + 1}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-bold text-slate-700 truncate">{c.drugName}</p>
+                      <p className="text-[11px] text-slate-400">유사도 {(c.similarity * 100).toFixed(0)}%</p>
+                    </div>
+                    <button onClick={() => removeMultiPill(i)} className="text-slate-300 hover:text-red-400 shrink-0"><X size={18} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2 pt-1">
+              <button onClick={() => { setMultiConfirm(false); setView('camera') }} className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-600 font-bold text-sm">+ 더 촬영</button>
+              <button onClick={handleMultiConfirm} disabled={multiCaptured.length === 0} className={`flex-[2] py-3 rounded-2xl font-bold text-sm ${multiCaptured.length > 0 ? 'bg-[#0192F5] text-white' : 'bg-slate-200 text-slate-400'}`}>확인 ({multiCaptured.length}개 분석)</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }

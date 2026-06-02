@@ -1,9 +1,9 @@
 """
-레퍼런스 DB 재생성 — 식약처 공식사진 → AI Hub 다각도 이미지로 교체
-문제: 모델은 AI Hub로 학습됐는데 레퍼런스는 식약처 공식사진 → 실제 폰 사진이 안 맞음
-해결: AI Hub 이미지가 있는 약은 그 임베딩으로 교체 (재학습 X, 임베딩만 재생성)
-- ref_names.json 순서/내용은 그대로 유지 (서버 호환)
-- ref_embeddings.npy 만 갱신 (AI Hub 있으면 교체, 없으면 기존 유지)
+레퍼런스 DB 멀티화 — 식약처(초록배경) + AI Hub(다각도) 둘 다 레퍼런스로 사용
+이유: 모델이 배경에 민감 → 한 종류 레퍼런스만 쓰면 다른 배경 사진을 못 맞춤
+해결: 약마다 식약처 이미지 + AI Hub 이미지 여러 장을 모두 레퍼런스에 넣음 (재학습 X)
+- 식약처 백업본(ref_embeddings_식약처백업.npy)을 베이스로 유지
+- 그 위에 AI Hub 임베딩을 추가 entry로 append (같은 약 이름)
 """
 import json, re
 from pathlib import Path
@@ -21,6 +21,7 @@ from tqdm import tqdm
 ML = Path(__file__).parent
 OUT = ML / 'output'
 DEVICE = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+REFS_PER_DRUG = 3
 
 
 class PillModel(nn.Module):
@@ -40,13 +41,14 @@ def main():
     keys = set(model.state_dict().keys())
     model.load_state_dict({k: v for k, v in state.items() if k in keys}, strict=False)
     model.eval()
-    print(f'모델 로드: {ckpt["num_classes"]}클래스')
 
+    # ── 베이스: train.py가 방금 현재 모델로 만든 식약처 레퍼런스 (모델 일치 필수) ──
+    base_path = OUT / 'ref_embeddings.npy'
+    base_embs = np.load(base_path)
     ref_names = json.load(open(OUT / 'ref_names.json', encoding='utf-8'))
-    old_embs = np.load(OUT / 'ref_embeddings.npy')
-    print(f'기존 레퍼런스: {len(ref_names)}개')
+    print(f'식약처 베이스: {len(ref_names)}개 ({base_path.name})')
 
-    # ── AI Hub 약 이름 → 이미지 매핑 (train.py의 match_mfds_name 동일 로직) ──
+    # ── AI Hub 이름 매칭 (train.py 동일 로직) ──
     aihub = pd.read_csv(ML / 'data' / 'aihub_pills.csv')
     mfds = pd.read_csv(ML / 'data' / 'pills.csv')
     mfds_names = list(mfds['item_name'].dropna().unique())
@@ -58,56 +60,42 @@ def main():
         b = _base(mn)
         if len(b) >= 5: p5.setdefault(b[:5], mn)
         if len(b) >= 4: p4.setdefault(b[:4], mn)
-    def match(aihub_name):
-        if aihub_name in mfds_name_set: return aihub_name
-        b = _base(aihub_name)
+    def match(an):
+        if an in mfds_name_set: return an
+        b = _base(an)
         if len(b) >= 5 and b[:5] in p5: return p5[b[:5]]
         if len(b) >= 4 and b[:4] in p4: return p4[b[:4]]
-        return aihub_name
-
-    # 통일이름 → AI Hub 이미지 경로들
-    name_to_imgs = defaultdict(list)
-    for code, grp in aihub.groupby('drug_code'):
-        uname = match(str(grp.iloc[0]['drug_name']))
-        name_to_imgs[uname].extend(grp['image_path'].tolist())
-    print(f'AI Hub 통일이름: {len(name_to_imgs)}개')
+        return an
 
     tf = transforms.Compose([
         transforms.Resize((224, 224)), transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
-    REFS_PER_DRUG = 3  # 약당 AI Hub 각도 몇 장 평균낼지
-
     @torch.no_grad()
-    def embed_avg(paths):
-        embs = []
-        for p in paths[:REFS_PER_DRUG]:
-            try:
-                img = Image.open(p).convert('RGB')
-                t = tf(img).unsqueeze(0).to(DEVICE)
-                embs.append(model.get_embedding(t).cpu().numpy()[0])
-            except Exception:
-                continue
-        if not embs:
+    def embed1(path):
+        try:
+            img = Image.open(path).convert('RGB')
+            t = tf(img).unsqueeze(0).to(DEVICE)
+            return model.get_embedding(t).cpu().numpy()[0]
+        except Exception:
             return None
-        v = np.mean(embs, axis=0)
-        n = np.linalg.norm(v)
-        return (v / n) if n > 0 else None
 
-    new_embs = old_embs.copy()
-    replaced = 0
-    for i, name in enumerate(tqdm(ref_names, desc='재생성')):
-        imgs = name_to_imgs.get(name)
-        if not imgs:
-            continue                       # AI Hub 없음 → 기존(식약처) 임베딩 유지
-        v = embed_avg(imgs)
-        if v is not None:
-            new_embs[i] = v
-            replaced += 1
+    # ── AI Hub 임베딩 추가 (약당 REFS_PER_DRUG 장) ──
+    extra_embs, extra_names = [], []
+    groups = list(aihub.groupby('drug_code'))
+    for code, grp in tqdm(groups, desc='AI Hub 추가'):
+        uname = match(str(grp.iloc[0]['drug_name']))
+        for path in grp['image_path'].tolist()[:REFS_PER_DRUG]:
+            e = embed1(path)
+            if e is not None:
+                extra_embs.append(e); extra_names.append(uname)
 
+    new_embs = np.vstack([base_embs, np.array(extra_embs, dtype=np.float32)])
+    new_names = list(ref_names) + extra_names
     np.save(OUT / 'ref_embeddings.npy', new_embs.astype(np.float32))
-    print(f'\n✅ 완료! {replaced}개 약을 AI Hub 임베딩으로 교체 (나머지 {len(ref_names)-replaced}개는 식약처 유지)')
-    print(f'   저장: {OUT/"ref_embeddings.npy"}')
+    json.dump(new_names, open(OUT / 'ref_names.json', 'w', encoding='utf-8'), ensure_ascii=False)
+    print(f'\n✅ 멀티 레퍼런스 완료!')
+    print(f'   식약처 {len(ref_names)} + AI Hub {len(extra_names)} = 총 {len(new_names)}개 레퍼런스')
 
 
 if __name__ == '__main__':
