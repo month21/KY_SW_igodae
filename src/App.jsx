@@ -864,7 +864,10 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
       interactions: drugInfo?.intrcQesitm ? [drugInfo.intrcQesitm.slice(0, 60)] : [],
       activeIngredients: permitInfo?.ingrName ? [permitInfo.ingrName] : pillName ? [pillName] : [],
       drugType:      etcOtc,
-      confidence:    calculateMatchConfidence({ pillFeature, matchSource, drugInfo, permitInfo }),
+      // 버그①: DL 매칭이면 모델의 실제 유사도를 그대로 표시 (calculateMatchConfidence가 ~80으로 덮어쓰는 거짓 차단)
+      confidence:    pillFeature.fromDL
+        ? (pillFeature.confidence ?? 0)
+        : calculateMatchConfidence({ pillFeature, matchSource, drugInfo, permitInfo }),
       matchSource,
       pillColor:     pillFeature.color,
       pillShape:     pillFeature.shape,
