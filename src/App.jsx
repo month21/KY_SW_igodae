@@ -759,8 +759,8 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
     }
   }
 
-  // DL 결과 없거나 둘 다 못 찾으면 기존 로직
-  if (!pillData) {
+  // DL 결과 없거나 둘 다 못 찾으면 기존 로직 (단, DL 결과는 제외 — OCR 각인 노이즈로 엉뚱한 약 재검색 방지)
+  if (!pillData && !pillFeature.fromDL) {
     // 1단계: Vision이 약 이름 읽었으면 이름으로 먼저 검색
     if (pillFeature.drugName && pillFeature.drugName.trim().length > 0) {
       pillData = await fetchPillByName(pillFeature.drugName.trim())
