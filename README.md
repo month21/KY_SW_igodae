@@ -47,7 +47,7 @@
 ## 사용 방법
 
 <img width="792" height="586" alt="image" src="https://github.com/user-attachments/assets/569fbffd-4c6d-432c-bbd6-e07fa0fc9b4c" />
-
+화면과 같이 로그인 실행
 ---
 ## 기술 스택
 
