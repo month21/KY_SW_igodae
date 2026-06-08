@@ -46,7 +46,7 @@ MFDS_DRUG_URL = 'https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEa
 
 EMB_DIM    = 512
 BATCH_SIZE = 64
-EPOCHS     = 5
+EPOCHS     = 3
 LR         = 3e-4
 PATIENCE   = 3
 AUG_PER_IMAGE = 1    # AI Hub 약당 50장 다각도 → 증강 불필요
@@ -917,12 +917,16 @@ def collect_web_negatives():
 # ════════════════════════════════════════════════════════════
 
 def extract_pill_mask(img):
-    """흰 배경에서 약 영역 마스크 추출 (간단한 임계값 방식)"""
-    gray = img.convert('L')
-    arr = np.array(gray)
-    # 흰 배경(>220)이 아닌 부분 = 약
-    mask = (arr < 220).astype(np.uint8) * 255
-    # 모폴로지 연산으로 마스크 정리
+    """배경색 자동 감지(네 모서리 샘플) → 약 영역 마스크. 흰/검정/초록 배경 모두 대응"""
+    arr = np.array(img.convert('RGB')).astype(np.int16)
+    c = 12
+    corners = np.concatenate([
+        arr[:c, :c].reshape(-1, 3), arr[:c, -c:].reshape(-1, 3),
+        arr[-c:, :c].reshape(-1, 3), arr[-c:, -c:].reshape(-1, 3),
+    ])
+    bg = corners.mean(0)
+    dist = np.sqrt(((arr - bg) ** 2).sum(2))
+    mask = (dist > 45).astype(np.uint8) * 255
     from PIL import ImageFilter
     mask_img = Image.fromarray(mask, 'L')
     mask_img = mask_img.filter(ImageFilter.MaxFilter(5))
@@ -933,7 +937,7 @@ def extract_pill_mask(img):
 def generate_random_background(size=(224, 224)):
     """랜덤 배경 생성 (테이블, 천, 종이 등 시뮬레이션)"""
     w, h = size
-    bg_type = random.choice(['solid', 'gradient', 'noise', 'texture', 'wood'])
+    bg_type = random.choice(['solid', 'gradient', 'noise', 'texture', 'wood', 'foil', 'foil'])
 
     if bg_type == 'solid':
         # 단색 배경 (다양한 테이블 색상)
@@ -980,6 +984,24 @@ def generate_random_background(size=(224, 224)):
                 arr[:, max(0,i):min(w,i+2)] = base - 20
         bg = Image.fromarray(arr)
         bg = bg.filter(ImageFilter.GaussianBlur(radius=2))
+
+    elif bg_type == 'foil':
+        # 은박/알루미늄 포장(PTP) 시뮬레이션 — 금속 광택 + 세로 줄무늬 반사 + 밝은 하이라이트
+        base = random.randint(150, 210)
+        arr = np.full((h, w, 3), base, dtype=np.int16)
+        # 세로 방향 금속 줄무늬(반사)
+        for x in range(0, w, random.randint(2, 6)):
+            shade = random.randint(-40, 50)
+            arr[:, x:x+random.randint(1, 3)] += shade
+        # 사선 하이라이트 띠 (광택)
+        for _ in range(random.randint(1, 3)):
+            yy = random.randint(0, h)
+            band = random.randint(10, 40)
+            arr[max(0,yy-band):min(h,yy+band), :] += random.randint(20, 70)
+        # 약간 푸른/회색 금속 톤
+        arr[:, :, 2] += random.randint(0, 25)
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+        bg = Image.fromarray(arr).filter(ImageFilter.GaussianBlur(radius=random.uniform(0.3, 1.0)))
 
     else:  # wood
         # 나무결 시뮬레이션
@@ -1038,6 +1060,18 @@ def camera_simulation(img):
     if random.random() < 0.5:
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(random.uniform(0.7, 1.3))
+
+    # 플라스틱 포장 반사광(glare) — 밝은 타원 하이라이트 합성
+    if random.random() < 0.35:
+        w, h = img.size
+        glare = Image.new('L', (w, h), 0)
+        gd = ImageDraw.Draw(glare)
+        gx, gy = random.randint(0, w), random.randint(0, h)
+        gr = random.randint(int(min(w, h) * 0.15), int(min(w, h) * 0.5))
+        gd.ellipse([gx-gr, gy-gr, gx+gr, gy+gr], fill=random.randint(60, 140))
+        glare = glare.filter(ImageFilter.GaussianBlur(radius=gr * 0.5))
+        white = Image.new('RGB', (w, h), (255, 255, 255))
+        img = Image.composite(white, img, glare)
 
     return img
 
@@ -1178,15 +1212,23 @@ class AugmentedPillDataset(Dataset):
         except:
             img = Image.new('RGB', (224, 224), (128, 128, 128))
 
-        if aug_idx == 0:
-            # 원본 (augmentation 없이)
-            img = self.to_tensor_norm(img)
-        else:
-            # 기본 augmentation만 (배경합성/카메라시뮬 제거 — AI Hub 다각도로 대체)
-            if self.transform:
-                img = self.transform(img)
-            else:
+        # AUG_PER_IMAGE=1 유지(데이터 2배 X) + 각 샘플을 확률적으로 증강해 실사진 robust 학습
+        r = random.random()
+        if r < 0.40:
+            img = self.to_tensor_norm(img)                 # 원본 40%
+        elif r < 0.75:
+            # 카메라시뮬(반사·블러·노이즈)은 항상, 배경합성은 마스크 양호할 때만 (쓰레기 샘플 방지)
+            try:
+                mask = extract_pill_mask(img)
+                cov = (np.array(mask) > 128).mean()
+                if 0.12 <= cov <= 0.65:
+                    img = composite_pill_on_background(img, bg_size=(256, 256))
+                img = camera_simulation(img)
                 img = self.to_tensor_norm(img)
+            except Exception:
+                img = self.to_tensor_norm(img)
+        else:
+            img = self.transform(img) if self.transform else self.to_tensor_norm(img)  # 기본 aug 25%
 
         return img, label
 
@@ -1565,7 +1607,7 @@ def main():
     ref_df = train_df.groupby('label').first().reset_index()
     ref_dataset = PillDataset(ref_df, val_transform)
 
-    nw = 0 if DEVICE.type == 'mps' else 4  # MPS는 멀티프로세스 불안정 → 싱글
+    nw = 4  # 데이터로딩 병렬화 (증강이 CPU 직렬이라 병목 → 워커로 분산). 워커는 CPU만 써서 MPS와 무관
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,  num_workers=nw, pin_memory=False)
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=nw, pin_memory=False)
     ref_loader   = DataLoader(ref_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=nw, pin_memory=False)
