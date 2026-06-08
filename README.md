@@ -56,7 +56,9 @@
 
 <img width="484" height="983" alt="image" src="https://github.com/user-attachments/assets/a40a0e94-a552-4065-9efc-3ae465b73293" />
 
+
 촬영 안내 문구 제시와 동시에 단일 약 인지 여러 약인지 선택 후 사진 업로드 또는 촬영
+
 
 <img width="486" height="982" alt="image" src="https://github.com/user-attachments/assets/64ec23ab-14d4-47b8-b03e-78acf56d3b59" />
 <img width="473" height="977" alt="image" src="https://github.com/user-attachments/assets/00b7c594-6910-4e40-b201-416c885f3729" />
