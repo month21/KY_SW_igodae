@@ -214,7 +214,9 @@ def inference():
 
         result = analyze_single_crop(img)
         threshold = ood_config.get('threshold', 0.45)
-        imprint = read_imprint(img)   # 각인(보조 식별 + 사용자 확인용)
+        # 각인 OCR(~1초)은 인식이 애매할 때만 (고신뢰는 불필요 → 속도↑)
+        conf = result['confidence'] if result else 0.0
+        imprint = read_imprint(img) if (result is not None and conf < 0.85) else ''
 
         if result is None:
             return jsonify({
