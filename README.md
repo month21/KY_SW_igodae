@@ -63,15 +63,19 @@
 <img width="486" height="982" alt="image" src="https://github.com/user-attachments/assets/64ec23ab-14d4-47b8-b03e-78acf56d3b59" />
 <img width="473" height="977" alt="image" src="https://github.com/user-attachments/assets/00b7c594-6910-4e40-b201-416c885f3729" />
 <img width="486" height="984" alt="image" src="https://github.com/user-attachments/assets/506f6c90-e157-447b-a4b1-d248e971d077" />
+
 위과 같이 분석 결과 도출
 
 <img width="481" height="982" alt="image" src="https://github.com/user-attachments/assets/4dbe91b6-09ca-406a-b6ba-fa0d6e3ec956" />
+
 분석 결과에서 AI 약사 채팅 버튼을 클릭하면 위와 같이 채팅 가능
 
 <img width="485" height="981" alt="image" src="https://github.com/user-attachments/assets/12aa8da8-9c4d-4f90-8af9-00880bd27c3e" />
+
 위와 같이 히스토리로 과거 어느 약을 검색 했는지 확인 가능
 
 <img width="484" height="982" alt="image" src="https://github.com/user-attachments/assets/ff3a7633-0c10-4973-80ea-68736b706a34" />
+
 위와 같이 과거 검색했던 결과를 다시 보기 가능
 
 ---
