@@ -8,3 +8,10 @@ pill-classifier/venv/
 pill-classifier/data/
 pill-classifier/output/
 .claude/
+
+# 작업용 로컬 문서 (GitHub 미포함)
+TODO_현재상황.md
+ml/AIHUB_DOWNLOAD_LIST.md
+여러약_한장씩_인식_백업방안.md
+발표_잘되는약_목록.txt
+VERCEL_배포_안내_팀원용.md
