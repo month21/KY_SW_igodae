@@ -1871,9 +1871,10 @@ function ChatView({ result, mfdsInfo, userConditions, onBack }) {
         messages: [
           { role: 'system', content: buildChatSystemPrompt(result, mfdsInfo, userConditions) },
           ...history,
-          { role: 'user', content: text }
+          { role: 'user', content: text },
+          { role: 'system', content: '출력 언어 규칙(최우선): 오직 한국어로만 답하세요. 영어 단어, 한자(漢字), 베트남어, 태국어 등 외국 문자/단어를 단 하나도 쓰지 마세요. 성분명·약학용어도 전부 한글로 적으세요. 이 규칙을 어기면 안 됩니다.' },
         ],
-        temperature: 0.3,
+        temperature: 0.1,
         max_tokens: 600,
       })
       const reply = data.choices?.[0]?.message?.content || '죄송합니다, 응답을 가져오지 못했어요.'
@@ -2467,9 +2468,22 @@ function CameraView({ onCapture, onCancel, mode = 'single', capturedCount = 0, l
     let mounted = true
     const start = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 }, height: { ideal: 1080 },   // 고해상도 요청 (각인/디테일 살림)
+          },
+        })
         if (!mounted) { stream.getTracks().forEach(t => t.stop()); return }
         streamRef.current = stream
+        // 연속 자동초점 적용 (지원 기기) — 카메라 흐림 방지
+        try {
+          const track = stream.getVideoTracks()[0]
+          const caps = track.getCapabilities ? track.getCapabilities() : {}
+          const adv = []
+          if (caps.focusMode && caps.focusMode.includes && caps.focusMode.includes('continuous')) adv.push({ focusMode: 'continuous' })
+          if (adv.length) await track.applyConstraints({ advanced: adv })
+        } catch {}
         if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); setReady(true) }
       } catch (e) { setError('카메라 접근 권한이 필요합니다.') }
     }
