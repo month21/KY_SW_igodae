@@ -303,7 +303,19 @@ async function safeFetchGroq(body, retries = 3, delay = 1000) {
       })
       if (res.status === 401) throw new Error('API 키가 유효하지 않습니다.')
       if (res.status === 429 || res.status >= 500) {
-        if (i < retries - 1) { await new Promise(r => setTimeout(r, delay * Math.pow(2, i))); continue }
+        if (i < retries - 1) {
+          // 백오프 기본값 + Groq가 알려준 실제 대기시간(헤더/본문) 중 큰 값 존중
+          let wait = delay * Math.pow(2, i)
+          const ra = Number(res.headers.get('retry-after'))
+          if (ra > 0) wait = Math.max(wait, ra * 1000)
+          else {
+            const t = await res.clone().text().catch(() => '')
+            const m = t.match(/try again in ([\d.]+)s/i)
+            if (m) wait = Math.max(wait, Math.ceil(parseFloat(m[1]) * 1000) + 400)
+          }
+          await new Promise(r => setTimeout(r, Math.min(wait, 9000)))
+          continue
+        }
       }
       if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || `HTTP ${res.status}`) }
       return await res.json()
@@ -353,6 +365,23 @@ async function fetchMultiPillInference(base64WithPrefix) {
     console.log('🔬 멀티약 분석 실패:', e.message)
     return null
   }
+}
+
+// ─── 외국 문자 제거 (모델이 한국어 답변에 한자·가나·태국어 등을 섞는 것 차단) ──
+// 신뢰도와 무관하게 모든 채팅 응답에 적용 — 프롬프트만으론 70b가 한자를 종종 끼워넣음
+function stripForeignChars(text) {
+  if (!text) return text
+  return String(text)
+    // 한자(CJK 통합/확장A)·가나·태국어·베트남 라틴확장·결합 성조부호 제거 (CJK 호환한자는 한글 음절을 먹어 제외)
+    .replace(/[\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF\u0E00-\u0E7F\u1EA0-\u1EFF\u0300-\u036F]/g, '')
+    // 한자만 들어있던 괄호가 비면 정리: (), （）, [ ], 〈 〉
+    .replace(/[（(]\s*[)）]/g, '')
+    .replace(/\[\s*\]/g, '')
+    .replace(/[〈《]\s*[〉》]/g, '')
+    // 빈 괄호/공백 정리
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,.?!，。：;])/g, '$1')
+    .trim()
 }
 
 // ─── 클라이언트 문장 자르기 (Groq 왕복 없이 즉시) ────────────────────────────
@@ -970,6 +999,8 @@ const buildChatSystemPrompt = (analysisResult, mfdsInfo, userConditions) => {
   const drugName = analysisResult?.summary || '미분석'
 
   const langRule = '반드시 한국어로만 답변하세요. 영어, 한자(漢字), 베트남어 등 외국어를 절대 섞지 마세요. 성분명·학명도 한글로 표기하세요.'
+  // 식약처 원문이 길면 분당 토큰(TPM) 초과로 429 발생 → 핵심만 잘라 프롬프트에 주입
+  const cut = (s, n = 280) => { const t = String(s || '-').trim(); return t.length > n ? t.slice(0, n) + '…' : t }
 
   const highConfidencePrompt = `
 당신은 식약처 공공 데이터를 기반으로 의약품 정보를 설명하는 '의약품 정보 분석 전문가'입니다.
@@ -993,7 +1024,7 @@ AI는 약물의 종류를 식별할 뿐 복용, 처방, 치료 적합성 판단�
 
 현재 분석된 약품: ${drugName}
 사용자 기저질환: ${userConditions || '없음'}
-${mfdsInfo ? `\n식품의약품안전처 공식 정보:\n- 효능: ${mfdsInfo.efcyQesitm || '-'}\n- 복용법: ${mfdsInfo.useMethodQesitm || '-'}\n- 주의사항: ${mfdsInfo.atpnQesitm || '-'}\n- 부작용: ${mfdsInfo.seQesitm || '-'}` : ''}
+${mfdsInfo ? `\n식품의약품안전처 공식 정보:\n- 효능: ${cut(mfdsInfo.efcyQesitm)}\n- 복용법: ${cut(mfdsInfo.useMethodQesitm)}\n- 주의사항: ${cut(mfdsInfo.atpnQesitm)}\n- 부작용: ${cut(mfdsInfo.seQesitm)}` : ''}
 `
 
   const midConfidencePrompt = `
@@ -1009,7 +1040,7 @@ ${langRule}
 
 현재 분석된 약품: ${drugName} (일치율 ${pct}%)
 사용자 기저질환: ${userConditions || '없음'}
-${mfdsInfo ? `\n식품의약품안전처 공식 정보:\n- 효능: ${mfdsInfo.efcyQesitm || '-'}\n- 복용법: ${mfdsInfo.useMethodQesitm || '-'}\n- 주의사항: ${mfdsInfo.atpnQesitm || '-'}` : ''}
+${mfdsInfo ? `\n식품의약품안전처 공식 정보:\n- 효능: ${cut(mfdsInfo.efcyQesitm)}\n- 복용법: ${cut(mfdsInfo.useMethodQesitm)}\n- 주의사항: ${cut(mfdsInfo.atpnQesitm)}` : ''}
 `
 
   const lowConfidencePrompt = `
@@ -1865,7 +1896,8 @@ function ChatView({ result, mfdsInfo, userConditions, onBack }) {
     setInput('')
     setLoading(true)
     try {
-      const history = messages.slice(1).map(m => ({ role: m.role, content: m.content }))
+      // 인사말 제외 + 최근 6개만 — 분당 토큰(TPM) 초과로 인한 429 방지
+      const history = messages.slice(1).slice(-6).map(m => ({ role: m.role, content: m.content }))
       const data = await safeFetchGroq({
         model: GROQ_MODEL,
         messages: [
@@ -1877,7 +1909,8 @@ function ChatView({ result, mfdsInfo, userConditions, onBack }) {
         temperature: 0.1,
         max_tokens: 600,
       })
-      const reply = data.choices?.[0]?.message?.content || '죄송합니다, 응답을 가져오지 못했어요.'
+      // 모델이 한자 등을 섞어도 신뢰도와 무관하게 제거
+      const reply = stripForeignChars(data.choices?.[0]?.message?.content) || '죄송합니다, 응답을 가져오지 못했어요.'
       setMessages(prev => [...prev, { role: 'assistant', content: reply, ts: Date.now() }])
     } catch (e) {
       setMessages(prev => [...prev, { role: 'assistant', content: `⚠️ 오류: ${e.message}`, ts: Date.now() }])
