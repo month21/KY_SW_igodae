@@ -50,6 +50,14 @@
 
 화면과 같이 로그인 실행
 
+<img width="487" height="978" alt="image" src="https://github.com/user-attachments/assets/9650681d-c9f7-45ac-a21d-b3b0544be020" />
+
+증상 입력
+
+<img width="484" height="983" alt="image" src="https://github.com/user-attachments/assets/a40a0e94-a552-4065-9efc-3ae465b73293" />
+
+촬영 안내 문구 제시와 동시에 단일 약 인지 여러 약인지 선택 후 사진 업로드 또는 촬영
+
 ---
 ## 기술 스택
 
