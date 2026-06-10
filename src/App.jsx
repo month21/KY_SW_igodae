@@ -549,7 +549,8 @@ async function fetchDrugPermission(drugName) {
   }
   const trySearch = async (name) => {
     const params = new URLSearchParams({ item_name: name, numOfRows: '3', pageNo: '1' })
-    const res = await fetchWithTimeout(`${MFDS_PRMISN_URL}&${params}`)
+    // 제품허가는 부가정보(허가일·성분 등)일 뿐 → 느리면 빨리 포기(4s)해 결과 표시 지연 최소화
+    const res = await fetchWithTimeout(`${MFDS_PRMISN_URL}&${params}`, {}, 4000)
     if (!res.ok) return null
     const data = await res.json()
     const raw = data?.body?.items
@@ -577,7 +578,9 @@ async function fetchDrugPermission(drugName) {
     }
     return null
   } catch (e) {
-    console.warn('제품허가 API 오류:', e.message)
+    // 타임아웃(abort)은 정상 fallback — 핵심 정보(효능·복용법)엔 영향 없음
+    const isAbort = e.name === 'AbortError' || /abort/i.test(e.message || '')
+    console.info(isAbort ? '제품허가 API 응답 지연 → 부가정보 생략(핵심 정보 정상)' : `제품허가 API 오류: ${e.message}`)
     return null
   }
 }
