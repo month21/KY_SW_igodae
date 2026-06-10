@@ -384,6 +384,13 @@ function stripForeignChars(text) {
     .trim()
 }
 
+// ─── 식약처 원문 오타 교정 (데이터 자체 오타 — 예: 타이레놀 부작용 "쇽 증상" → "쇼크 증상") ──
+function fixMfdsTypos(text) {
+  if (!text) return text
+  return String(text)
+    .replace(/쇽/g, '쇼크')   // 식약처 다수 품목에 '쇼크'가 '쇽'으로 오기됨
+}
+
 // ─── 클라이언트 문장 자르기 (Groq 왕복 없이 즉시) ────────────────────────────
 function trimToSentences(text, n = 2) {
   if (!text) return ''
@@ -427,13 +434,13 @@ async function fetchMfdsInfo(drugName) {
   const parseMfdsItem = (item) => ({
     itemName: item.itemName,
     entpName: item.entpName,
-    efcyQesitm: item.efcyQesitm,
-    useMethodQesitm: item.useMethodQesitm,
-    atpnWarnQesitm: item.atpnWarnQesitm,
-    atpnQesitm: item.atpnQesitm,
-    intrcQesitm: item.intrcQesitm,
-    seQesitm: item.seQesitm,
-    depositMethodQesitm: item.depositMethodQesitm,
+    efcyQesitm: fixMfdsTypos(item.efcyQesitm),
+    useMethodQesitm: fixMfdsTypos(item.useMethodQesitm),
+    atpnWarnQesitm: fixMfdsTypos(item.atpnWarnQesitm),
+    atpnQesitm: fixMfdsTypos(item.atpnQesitm),
+    intrcQesitm: fixMfdsTypos(item.intrcQesitm),
+    seQesitm: fixMfdsTypos(item.seQesitm),
+    depositMethodQesitm: fixMfdsTypos(item.depositMethodQesitm),
     source: '식품의약품안전처',
   })
   const trySearch = async (name) => {
@@ -833,10 +840,10 @@ async function analyzeSinglePill(pillFeature, symptomHint) {
   }
 
   if (pillData) {
-    let efcySummary = drugInfo?.efcyQesitm || ''
-    let atpnSummary = drugInfo?.atpnQesitm || ''
-    let useSummary  = drugInfo?.useMethodQesitm || ''
-    let sideEffects = drugInfo?.seQesitm || ''
+    let efcySummary = fixMfdsTypos(drugInfo?.efcyQesitm || '')
+    let atpnSummary = fixMfdsTypos(drugInfo?.atpnQesitm || '')
+    let useSummary  = fixMfdsTypos(drugInfo?.useMethodQesitm || '')
+    let sideEffects = fixMfdsTypos(drugInfo?.seQesitm || '')
     // 작업2: Groq 요약 제거 → 클라이언트에서 앞 문장만 자르기 (왕복 0초, 원문 보존은 별도 필드)
     const efcyFull = efcySummary, atpnFull = atpnSummary, useFull = useSummary
     efcySummary = trimToSentences(efcySummary, 2)
@@ -3299,6 +3306,9 @@ export default function App() {
 
   const handleLogoTap = () => {
     if (view !== 'home') setView('home')
+    // 로고 = 홈 버튼: 분석 결과 화면이어도 깨끗한 초기 홈으로 (안 지우면 결과카드가 남음)
+    setPreviewUrl(null); setAnalysisResult(null); setMfdsInfo(null)
+    setPillResults([]); setCombinedAnalysis(null); setDurWarnings([])
     const next = logoTapCount + 1
     setLogoTapCount(next)
     if (logoTapTimer.current) clearTimeout(logoTapTimer.current)
