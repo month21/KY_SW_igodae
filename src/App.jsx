@@ -3019,22 +3019,26 @@ export default function App() {
   }, [])
 
   // ── Base64 Firestore 저장 (Storage 미사용) ───────────────────────────────────
-  const saveToFirestore = useCallback(async (result, blob) => {
+  const saveToFirestore = useCallback(async (result, blob, allResults = null, combined = null) => {
     if (!db || !currentUser || isGuest) return
+    // Firestore는 undefined 값을 거부하므로 JSON 직렬화로 정리
+    const clean = (v) => (v == null ? null : JSON.parse(JSON.stringify(v)))
     try {
       let imageBase64 = null
       if (blob) {
         imageBase64 = await compressImageToBase64(blob)
       }
       await addDoc(LOGS_PATH(), {
-        userId:        currentUser.uid,
-        statusCode:    result.statusCode,
-        statusText:    result.statusText,
-        summary:       result.summary,
-        confidence:    result.confidence,
-        imageBase64:   imageBase64,
+        userId:           currentUser.uid,
+        statusCode:       result.statusCode,
+        statusText:       result.statusText,
+        summary:          result.summary,
+        confidence:       result.confidence,
+        imageBase64:      imageBase64,
         userConditions,
-        createdAt:     serverTimestamp(),
+        pillResults:      clean(allResults || [result]), // 분석 상세 전체 저장 (히스토리 복원용)
+        combinedAnalysis: clean(combined),               // 종합/상호작용 분석 저장
+        createdAt:        serverTimestamp(),
       })
     } catch (e) { console.warn('Firestore 저장 실패:', e.message) }
   }, [currentUser, isGuest, userConditions, compressImageToBase64])
@@ -3207,8 +3211,10 @@ export default function App() {
       // ── 종합분석·DUR·저장은 백그라운드 (결과 표시를 막지 않음) ──
       ;(async () => {
         try {
+          let combined = null
           if (results.length >= 2) {
-            setCombinedAnalysis(await analyzePillsCombined(results, symptom))
+            combined = await analyzePillsCombined(results, symptom)
+            setCombinedAnalysis(combined)
           }
           const userProfile = {
             isPregnant: userConditions.includes('임신') || userConditions.includes('임부'),
@@ -3217,7 +3223,7 @@ export default function App() {
           const dur = await runDurCheck(results, userProfile)
           setDurWarnings(dur)
           if (results[0]?.statusCode !== 'unidentified') {
-            await saveToFirestore(results[0], blob)
+            await saveToFirestore(results[0], blob, results, combined)
           }
         } catch (e) { console.warn('백그라운드 분석 실패:', e.message) }
       })()
@@ -3388,10 +3394,14 @@ export default function App() {
     <HistoryView
       logs={analysisLogs} isGuest={isGuest}
       onSelect={(log) => {
-        setAnalysisResult({ ...log })
-        setPillResults([{ ...log }])
+        // 저장된 상세 정보가 있으면 복원, 없으면(구버전 기록) 요약만 표시
+        const results = (log.pillResults && log.pillResults.length > 0) ? log.pillResults : [{ ...log }]
+        setAnalysisResult(results[0])
+        setPillResults(results)
+        setCombinedAnalysis(log.combinedAnalysis || null)
+        setDurWarnings([])
         setMfdsInfo(null)
-        setPreviewUrl(null)
+        setPreviewUrl(log.imageBase64 || null)
         setView('home')
       }}
       onBack={() => setView('home')}
