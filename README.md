@@ -54,10 +54,11 @@
 
 촬영 안내 문구 제시와 동시에 단일 약 인지 여러 약인지 선택 후 사진 업로드 또는 촬영
 
+<img width="962" height="1808" alt="image" src="https://github.com/user-attachments/assets/6b995b38-49b7-4f7b-8520-a5a4eeb5ec2d" />
+<img width="962" height="1788" alt="image" src="https://github.com/user-attachments/assets/abecc9eb-bc0a-411d-85db-56c107382693" />
 
-<img width="486" height="982" alt="image" src="https://github.com/user-attachments/assets/64ec23ab-14d4-47b8-b03e-78acf56d3b59" />
-<img width="473" height="977" alt="image" src="https://github.com/user-attachments/assets/00b7c594-6910-4e40-b201-416c885f3729" />
-<img width="486" height="984" alt="image" src="https://github.com/user-attachments/assets/506f6c90-e157-447b-a4b1-d248e971d077" />
+
+
 
 위과 같이 분석 결과 도출
 
@@ -65,7 +66,7 @@
 
 분석 결과에서 AI 약사 채팅 버튼을 클릭하면 위와 같이 채팅 가능
 
-<img width="485" height="981" alt="image" src="https://github.com/user-attachments/assets/12aa8da8-9c4d-4f90-8af9-00880bd27c3e" />
+<img width="972" height="1800" alt="image" src="https://github.com/user-attachments/assets/63163972-9e54-48d7-9140-f9441ae894b7" />
 
 위와 같이 히스토리로 과거 어느 약을 검색 했는지 확인 가능
 
