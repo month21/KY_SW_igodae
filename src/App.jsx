@@ -586,24 +586,37 @@ async function fetchDrugPermission(drugName) {
 }
 
 // ─── DUR API 헬퍼 ────────────────────────────────────────────────────────────
+// DUR 조회 성공 결과 캐시 (같은 약은 한 번 뜨면 계속 유지 → 깜빡임 방지). 실패는 캐시 안 함
+const _durCache = new Map()
+
 async function fetchDurApi(endpoint, drugName) {
   if (!drugName) return []
-  try {
-    const params = new URLSearchParams({
-      itemName: drugName,
-      numOfRows: '5',
-      pageNo: '1',
-    })
-    const res = await fetchWithTimeout(`${endpoint}&${params}`)
-    if (!res.ok) return []
-    const data = await res.json()
-    const raw = data?.body?.items
-    if (!raw) return []
-    return Array.isArray(raw) ? raw : Array.isArray(raw.item) ? raw.item : raw.item ? [raw.item] : []
-  } catch (e) {
-    console.warn('DUR API 오류:', e.message)
-    return []
+  const cacheKey = `${endpoint}|${drugName}`
+  if (_durCache.has(cacheKey)) return _durCache.get(cacheKey)
+
+  const params = new URLSearchParams({ itemName: drugName, numOfRows: '5', pageNo: '1' })
+  const url = `${endpoint}&${params}`
+
+  // 간헐적 실패(타임아웃·일시적 4xx/5xx)로 같은 약 DUR이 떴다 안 떴다 하는 문제 → 최대 3회 재시도
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, {}, 8000)
+      if (!res.ok) {
+        if (attempt < 2) { await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue }
+        return []
+      }
+      const data = await res.json()
+      const raw = data?.body?.items
+      const items = !raw ? [] : Array.isArray(raw) ? raw : Array.isArray(raw.item) ? raw.item : raw.item ? [raw.item] : []
+      _durCache.set(cacheKey, items) // 성공만 캐시
+      return items
+    } catch (e) {
+      if (attempt < 2) { await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue }
+      console.warn('DUR API 오류:', e.message)
+      return []
+    }
   }
+  return []
 }
 
 async function checkDurCombination(drugNames) {
