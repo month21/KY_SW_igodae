@@ -3314,6 +3314,9 @@ export default function App() {
 
 
   const handleLogoTap = () => {
+    // 분석 중에는 홈 이동 차단: 진행 중 상태를 초기화하면 끝나지 않은 비동기 분석이
+    // 빈 화면에 결과를 덮어써 버그가 발생함
+    if (analyzing || mfdsLoading) return
     if (view !== 'home') setView('home')
     // 로고 = 홈 버튼: 분석 결과 화면이어도 깨끗한 초기 홈으로 (안 지우면 결과카드가 남음)
     setPreviewUrl(null); setAnalysisResult(null); setMfdsInfo(null)
