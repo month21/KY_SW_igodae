@@ -70,7 +70,7 @@
 
 위와 같이 히스토리로 과거 어느 약을 검색 했는지 확인 가능
 
-<img width="484" height="982" alt="image" src="https://github.com/user-attachments/assets/ff3a7633-0c10-4973-80ea-68736b706a34" />
+<img width="962" height="1768" alt="image" src="https://github.com/user-attachments/assets/09d8ca2c-acd3-405b-bd95-00eba81875a9" />
 
 위와 같이 과거 검색했던 결과를 다시 보기 가능
 
